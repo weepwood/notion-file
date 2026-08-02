@@ -19,6 +19,7 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "kts", "c", "h", "cpp", "hpp", "cs", "sh", "bash", "ps1", "sql", "rb", "php", "swift",
     "vue", "svelte", "ini", "conf", "env", "csv",
 ];
+const MAX_INLINE_TEXT_SIZE: u64 = 1024 * 1024;
 
 pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncResult> {
     if request.folder_path.trim().is_empty() {
@@ -304,7 +305,7 @@ async fn build_file_section(
         ),
     ];
 
-    if TEXT_EXTENSIONS.contains(&extension.as_str()) {
+    if TEXT_EXTENSIONS.contains(&extension.as_str()) && file.size <= MAX_INLINE_TEXT_SIZE {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|error| anyhow::anyhow!("文本文件不是有效 UTF-8：{error}"))?;
