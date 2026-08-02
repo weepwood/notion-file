@@ -41,7 +41,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view $env:TAG *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $exists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($exists) {
             "exists=true" >> $env:GITHUB_OUTPUT
           } else {
             "exists=false" >> $env:GITHUB_OUTPUT
