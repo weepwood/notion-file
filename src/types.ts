@@ -1,4 +1,10 @@
-export type SyncStatus = "new" | "modified" | "unchanged" | "deleted" | "failed" | "synced";
+export type SyncStatus =
+  | "new"
+  | "modified"
+  | "unchanged"
+  | "deleted"
+  | "failed"
+  | "synced";
 
 export interface AppConfig {
   folderPath: string;
@@ -43,6 +49,9 @@ export interface SyncItemResult {
 export interface SyncResult {
   startedAt: string;
   finishedAt: string;
+  documentTitle: string;
+  pageId: string;
+  pageUrl?: string;
   created: number;
   updated: number;
   unchanged: number;
