@@ -153,7 +153,7 @@ impl NotionClient {
                 reqwest::Method::PATCH,
                 format!("{NOTION_BASE_URL}/pages/{page_id}"),
             )
-            .json(&json!({ "archived": true }))
+            .json(&json!({ "in_trash": true }))
             .send()
             .await?;
         Self::parse(response).await?;
