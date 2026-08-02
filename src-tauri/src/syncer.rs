@@ -161,10 +161,19 @@ pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncRe
         "正在写入 Notion 文档",
     );
 
-    if !created_document {
-        notion.clear_page(&page_id).await?;
+    let (final_page_id, final_page_url) = if created_document {
+        if let Err(error) = notion.append_blocks(&page_id, blocks).await {
+            let _ = notion.archive_page(&page_id).await;
+            return Err(error).context("写入新建的 Notion 文档失败，已将空白页面移入回收站");
+        }
+        (page_id, page_url)
+    } else {
+        replace_document_page(&notion, &request, &document_title, &page_id, blocks).await?
+    };
+
+    for item in &mut items {
+        item.page_id = Some(final_page_id.clone());
     }
-    notion.append_blocks(&page_id, blocks).await?;
 
     let synced_at = Utc::now().to_rfc3339();
     let entries: HashMap<String, SyncEntry> = scan
@@ -174,7 +183,7 @@ pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncRe
             (
                 file.relative_path.clone(),
                 SyncEntry {
-                    page_id: page_id.clone(),
+                    page_id: final_page_id.clone(),
                     hash: file.hash.clone(),
                     synced_at: synced_at.clone(),
                     mime_type: file.mime_type.clone(),
@@ -184,19 +193,17 @@ pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncRe
         .collect();
 
     state.folder_path = folder_key;
-    state.document_page_id = Some(page_id.clone());
-    state.document_page_url = page_url.clone();
+    state.document_page_id = Some(final_page_id.clone());
+    state.document_page_url = final_page_url.clone();
     state.entries = entries;
     storage::save_state(app, &state)?;
-
-    let _ = request.archive_deleted;
 
     Ok(SyncResult {
         started_at,
         finished_at: Utc::now().to_rfc3339(),
         document_title,
-        page_id,
-        page_url,
+        page_id: final_page_id,
+        page_url: final_page_url,
         created,
         updated,
         unchanged,
@@ -222,26 +229,58 @@ async fn resolve_document_page(
         }
     }
 
-    let parent = if request.root_page_id.trim().is_empty() {
+    let CreatedPage { id, url } = notion
+        .create_document_page(parent_page_id(request), document_title)
+        .await
+        .map_err(|error| create_page_error(request, error))?;
+
+    Ok((id, url, true))
+}
+
+async fn replace_document_page(
+    notion: &NotionClient,
+    request: &SyncRequest,
+    document_title: &str,
+    old_page_id: &str,
+    blocks: Vec<Value>,
+) -> Result<(String, Option<String>)> {
+    let CreatedPage {
+        id: replacement_id,
+        url: replacement_url,
+    } = notion
+        .create_document_page(parent_page_id(request), document_title)
+        .await
+        .map_err(|error| create_page_error(request, error))?;
+
+    if let Err(error) = notion.append_blocks(&replacement_id, blocks).await {
+        let _ = notion.archive_page(&replacement_id).await;
+        return Err(error).context("写入替换文档失败，原有 Notion 文档保持不变");
+    }
+
+    if let Err(error) = notion.archive_page(old_page_id).await {
+        let _ = notion.archive_page(&replacement_id).await;
+        return Err(error).context("替换文档已写入，但无法归档旧文档；已回滚到原有文档");
+    }
+
+    Ok((replacement_id, replacement_url))
+}
+
+fn parent_page_id(request: &SyncRequest) -> Option<&str> {
+    if request.root_page_id.trim().is_empty() {
         None
     } else {
         Some(request.root_page_id.trim())
-    };
+    }
+}
 
-    let CreatedPage { id, url } = notion
-        .create_document_page(parent, document_title)
-        .await
-        .map_err(|error| {
-            if request.root_page_id.trim().is_empty() {
-                anyhow::anyhow!(
-                    "无法直接在 Notion 工作区创建页面。当前 Token 很可能是内部 Integration Token；请展开“内部 Integration 兼容设置”，填写一个已共享给该 Integration 的父页面 ID。原始错误：{error}"
-                )
-            } else {
-                anyhow::anyhow!("无法在指定父页面下创建同名文档：{error}")
-            }
-        })?;
-
-    Ok((id, url, true))
+fn create_page_error(request: &SyncRequest, error: anyhow::Error) -> anyhow::Error {
+    if request.root_page_id.trim().is_empty() {
+        anyhow::anyhow!(
+            "无法直接在 Notion 工作区创建页面。当前 Token 很可能是内部 Integration Token；请展开“内部 Integration 兼容设置”，填写一个已共享给该 Integration 的父页面 ID。原始错误：{error}"
+        )
+    } else {
+        anyhow::anyhow!("无法在指定父页面下创建同名文档：{error}")
+    }
 }
 
 async fn build_file_section(
