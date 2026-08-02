@@ -4,7 +4,7 @@ mod scanner;
 mod storage;
 mod syncer;
 
-use models::{AppConfig, ScanResult, SyncRequest, SyncResult};
+use models::{AppConfig, BackupJob, BackupResult, BackupSnapshot, RestoreRequest, RestoreResult, ScanResult};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -35,17 +35,28 @@ async fn test_notion_connection(root_page_id: String) -> Result<String, String> 
 }
 
 #[tauri::command]
-async fn scan_folder(app: AppHandle, folder_path: String, skip_hidden: bool) -> Result<ScanResult, String> {
+async fn scan_backup(app: AppHandle, job: BackupJob) -> Result<ScanResult, String> {
     let state = storage::load_state(&app).map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || scanner::scan(&folder_path, skip_hidden, &state))
+    let task = state.tasks.get(&job.id).cloned().unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || scanner::scan(&job.folder_path, job.skip_hidden, &task))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn sync_folder(app: AppHandle, request: SyncRequest) -> Result<SyncResult, String> {
-    syncer::synchronize(&app, request).await.map_err(|error| error.to_string())
+async fn run_backup(app: AppHandle, job: BackupJob) -> Result<BackupResult, String> {
+    syncer::backup(&app, job).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn restore_backup(app: AppHandle, request: RestoreRequest) -> Result<RestoreResult, String> {
+    syncer::restore(&app, request).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_backup_history(app: AppHandle, job_id: String) -> Result<Vec<BackupSnapshot>, String> {
+    syncer::history(&app, &job_id).map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -58,8 +69,10 @@ pub fn run() {
             save_notion_token,
             has_saved_token,
             test_notion_connection,
-            scan_folder,
-            sync_folder,
+            scan_backup,
+            run_backup,
+            restore_backup,
+            get_backup_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
