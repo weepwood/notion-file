@@ -1,10 +1,20 @@
-export type SyncStatus = "new" | "modified" | "unchanged" | "deleted" | "failed" | "synced";
+export type FileStatus = "new" | "modified" | "unchanged" | "backed_up" | "marked_deleted" | "failed" | "restored" | "skipped";
 
-export interface AppConfig {
+export interface BackupJob {
+  id: string;
+  name: string;
   folderPath: string;
   rootPageId: string;
-  archiveDeleted: boolean;
   skipHidden: boolean;
+  includeTextPreview: boolean;
+  autoBackupMinutes: number;
+  enabled: boolean;
+  lastBackupAt?: string | null;
+}
+
+export interface AppConfig {
+  jobs: BackupJob[];
+  activeJobId?: string | null;
 }
 
 export interface ScannedFile {
@@ -13,7 +23,7 @@ export interface ScannedFile {
   size: number;
   modifiedAt: number;
   mimeType: string;
-  status: SyncStatus;
+  status: FileStatus;
   hash: string;
 }
 
@@ -26,32 +36,46 @@ export interface ScanResult {
   deletedCount: number;
 }
 
-export interface SyncRequest {
-  folderPath: string;
-  rootPageId: string;
-  archiveDeleted: boolean;
-  skipHidden: boolean;
-}
-
-export interface SyncItemResult {
+export interface BackupItemResult {
   relativePath: string;
-  status: SyncStatus;
+  status: FileStatus;
   pageId?: string;
   message?: string;
 }
 
-export interface SyncResult {
+export interface BackupResult {
   startedAt: string;
   finishedAt: string;
-  created: number;
-  updated: number;
+  snapshotPageId?: string | null;
+  uploaded: number;
   unchanged: number;
-  archived: number;
+  markedDeleted: number;
   failed: number;
-  items: SyncItemResult[];
+  totalBytes: number;
+  items: BackupItemResult[];
 }
 
-export interface SyncProgress {
+export interface BackupSnapshot {
+  id: string;
+  startedAt: string;
+  finishedAt: string;
+  summaryPageId?: string | null;
+  totalFiles: number;
+  totalBytes: number;
+  uploaded: number;
+  unchanged: number;
+  markedDeleted: number;
+  failed: number;
+}
+
+export interface RestoreResult {
+  restored: number;
+  skipped: number;
+  failed: number;
+  items: BackupItemResult[];
+}
+
+export interface BackupProgress {
   current: number;
   total: number;
   relativePath: string;
