@@ -1,0 +1,38 @@
+name: Release Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, '发布 v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Build and publish Windows installers
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Notion Backup v__VERSION__
+          releaseBody: |
+            Notion Backup Windows 安装包。
+
+            - NSIS：适合普通安装
+            - MSI：适合企业部署和集中管理
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          args: --bundles nsis,msi
