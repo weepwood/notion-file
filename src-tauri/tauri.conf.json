@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Notion File",
-  "version": "0.1.0",
+  "productName": "Notion Backup",
+  "version": "0.2.0",
   "identifier": "com.weepwood.notionfile",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,11 +12,11 @@
   "app": {
     "windows": [{
       "label": "main",
-      "title": "Notion File",
-      "width": 1180,
-      "height": 800,
-      "minWidth": 960,
-      "minHeight": 680,
+      "title": "Notion Backup",
+      "width": 1280,
+      "height": 840,
+      "minWidth": 1000,
+      "minHeight": 700,
       "resizable": true,
       "fullscreen": false
     }],
@@ -25,8 +25,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
-    "shortDescription": "将本地文件夹同步到 Notion",
-    "longDescription": "使用 Tauri 2、React 与 Rust 构建的本地文件夹到 Notion 单向同步工具。",
+    "shortDescription": "将本地文件增量备份到 Notion",
+    "longDescription": "基于 Tauri 2、React 与 Rust 的本地文件到 Notion 增量备份工具，支持历史版本、分片上传和恢复。",
     "windows": {
       "wix": null,
       "nsis": { "installMode": "currentUser" }
