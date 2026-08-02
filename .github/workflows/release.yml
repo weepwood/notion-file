@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - src-tauri/Cargo.toml
+      - src-tauri/tauri.conf.json
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $tag = "v$($config.version)"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "TAG=$tag" >> $env:GITHUB_ENV
+
+      - name: Check existing release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install dependencies
+        if: steps.release.outputs.exists != 'true'
+        run: npm install
+
+      - name: Build Windows installers
+        if: steps.release.outputs.exists != 'true'
+        run: npm run desktop:build
+
+      - name: Create GitHub release
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if (-not (git tag --list $env:TAG)) {
+            git tag -a $env:TAG -m "Notion File $env:TAG"
+            git push origin $env:TAG
+          }
+
+          $assets = @()
+          $assets += Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $portable = "src-tauri/target/release/notion-file.exe"
+          if (Test-Path $portable) {
+            $assets += (Resolve-Path $portable).Path
+          }
+
+          if ($assets.Count -eq 0) {
+            throw "No release assets were generated."
+          }
+
+          gh release create $env:TAG --title "Notion File $env:TAG" --generate-notes @assets
