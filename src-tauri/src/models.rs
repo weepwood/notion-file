@@ -12,7 +12,12 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { folder_path: String::new(), root_page_id: String::new(), archive_deleted: false, skip_hidden: true }
+        Self {
+            folder_path: String::new(),
+            root_page_id: String::new(),
+            archive_deleted: false,
+            skip_hidden: true,
+        }
     }
 }
 
@@ -60,6 +65,13 @@ pub struct SyncEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncState {
+    #[serde(default)]
+    pub folder_path: String,
+    #[serde(default)]
+    pub document_page_id: Option<String>,
+    #[serde(default)]
+    pub document_page_url: Option<String>,
+    #[serde(default)]
     pub entries: HashMap<String, SyncEntry>,
 }
 
@@ -77,6 +89,9 @@ pub struct SyncItemResult {
 pub struct SyncResult {
     pub started_at: String,
     pub finished_at: String,
+    pub document_title: String,
+    pub page_id: String,
+    pub page_url: Option<String>,
     pub created: usize,
     pub updated: usize,
     pub unchanged: usize,

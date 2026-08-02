@@ -31,21 +31,40 @@ fn has_saved_token() -> bool {
 async fn test_notion_connection(root_page_id: String) -> Result<String, String> {
     let token = storage::load_token().map_err(|error| error.to_string())?;
     let client = notion::NotionClient::new(token).map_err(|error| error.to_string())?;
-    client.get_page_title(&root_page_id).await.map_err(|error| error.to_string())
+
+    if root_page_id.trim().is_empty() {
+        client
+            .get_connection_label()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        client
+            .get_page_title(&root_page_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command]
-async fn scan_folder(app: AppHandle, folder_path: String, skip_hidden: bool) -> Result<ScanResult, String> {
+async fn scan_folder(
+    app: AppHandle,
+    folder_path: String,
+    skip_hidden: bool,
+) -> Result<ScanResult, String> {
     let state = storage::load_state(&app).map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || scanner::scan(&folder_path, skip_hidden, &state))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        scanner::scan(&folder_path, skip_hidden, &state)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn sync_folder(app: AppHandle, request: SyncRequest) -> Result<SyncResult, String> {
-    syncer::synchronize(&app, request).await.map_err(|error| error.to_string())
+    syncer::synchronize(&app, request)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
