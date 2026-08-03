@@ -1,0 +1,38 @@
+name: Fix Upload Diagnostics Banner
+
+on:
+  push:
+    branches: [feat/upload-diagnostics-v0.6.1]
+    paths:
+      - scripts/fix_upload_banner.py
+      - .github/workflows/fix-upload-banner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/upload-diagnostics-v0.6.1
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Apply banner fix
+        run: python scripts/fix_upload_banner.py
+
+      - name: Commit clean source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm scripts/fix_upload_banner.py .github/workflows/fix-upload-banner.yml
+          git add src/App.tsx
+          git commit -m "fix: 仅在上传任务中显示速度诊断"
+          git push origin HEAD:feat/upload-diagnostics-v0.6.1
