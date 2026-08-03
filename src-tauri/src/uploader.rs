@@ -1,7 +1,7 @@
-use crate::models::{SingleUploadRequest, UploadRecord};
+use crate::ffmpeg;
+use crate::models::{SingleUploadRequest, UploadProgress, UploadRecord};
 use crate::notion::{
-    divider_block, file_block, heading_block, metadata_callout, text_blocks, CreatedPage,
-    NotionClient,
+    divider_block, heading_block, metadata_callout, text_blocks, CreatedPage, NotionClient,
 };
 use crate::storage;
 use anyhow::{Context, Result};
@@ -10,7 +10,7 @@ use reqwest::{multipart, Client, Response};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncReadExt;
 
 const NOTION_BASE_URL: &str = "https://api.notion.com/v1";
@@ -21,11 +21,28 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "kts", "c", "h", "cpp", "hpp", "cs", "sh", "bash", "ps1", "sql", "rb", "php", "swift",
     "vue", "svelte", "ini", "conf", "env", "csv",
 ];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "amv", "asf", "wmv", "avi", "f4v", "flv", "gifv", "m4v", "mp4", "mkv", "webm", "mov",
+    "qt", "mpeg", "mpg", "m2ts", "mts", "ts",
+];
 const MAX_INLINE_TEXT_SIZE: u64 = 1024 * 1024;
 const MAX_SINGLE_PART_SIZE: u64 = 20 * 1024 * 1024;
 const MULTI_PART_SIZE: u64 = 10 * 1024 * 1024;
 const MAX_NOTION_FILE_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 const HASH_BUFFER_SIZE: usize = 1024 * 1024;
+
+struct UploadAsset {
+    path: PathBuf,
+    file_name: String,
+    mime_type: String,
+    size: u64,
+}
+
+struct UploadOutcome {
+    page: CreatedPage,
+    segment_count: usize,
+    used_ffmpeg: bool,
+}
 
 pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<UploadRecord> {
     if request.file_path.trim().is_empty() {
@@ -52,39 +69,46 @@ pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<Upl
         .essence_str()
         .to_string();
     let size = metadata.len();
-    let sha256 = if size <= MAX_NOTION_FILE_SIZE {
-        hash_file(&file_path).await?
-    } else {
-        String::new()
-    };
+    let display_mode = normalize_display_mode(&request.display_mode).to_string();
+    let is_video = is_video_file(&file_path, &mime_type);
+
+    emit_progress(app, 0, 1, "正在计算文件校验值", &file_name);
+    let sha256 = hash_file(&file_path).await?;
     let uploaded_at = Utc::now().to_rfc3339();
     let record_id = format!("upload-{}", Utc::now().timestamp_millis());
 
-    let result = if size > MAX_NOTION_FILE_SIZE {
-        Err(anyhow::anyhow!(
-            "文件超过 Notion 付费工作区允许的 5 GiB 上限"
-        ))
-    } else {
-        upload_to_notion(
-            &file_path,
-            &file_name,
-            &mime_type,
-            size,
-            &sha256,
-            &request.root_page_id,
-        )
-        .await
-    };
+    let result = prepare_and_upload(
+        app,
+        &file_path,
+        &file_name,
+        &mime_type,
+        size,
+        &sha256,
+        &request.root_page_id,
+        &display_mode,
+        is_video,
+    )
+    .await;
 
     let record = match result {
-        Ok(page) => {
-            let message = if size > MAX_SINGLE_PART_SIZE {
+        Ok(outcome) => {
+            let mode_label = if display_mode == "video" {
+                "视频块"
+            } else {
+                "文件块"
+            };
+            let message = if outcome.used_ffmpeg {
                 format!(
-                    "文件已通过 {} 个分片上传并写入 Notion 页面",
+                    "视频已由 ffmpeg 切分为 {} 段，并以{mode_label}写入 Notion 页面",
+                    outcome.segment_count
+                )
+            } else if size > MAX_SINGLE_PART_SIZE {
+                format!(
+                    "文件已通过 {} 个 API 分片上传，并以{mode_label}写入 Notion 页面",
                     part_count(size)
                 )
             } else {
-                "文件已上传并写入 Notion 页面".to_string()
+                format!("文件已上传，并以{mode_label}写入 Notion 页面")
             };
             UploadRecord {
                 id: record_id,
@@ -95,9 +119,12 @@ pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<Upl
                 sha256,
                 uploaded_at,
                 status: "success".to_string(),
-                page_id: Some(page.id),
-                page_url: page.url,
+                page_id: Some(outcome.page.id),
+                page_url: outcome.page.url,
                 message: Some(message),
+                display_mode,
+                segment_count: outcome.segment_count,
+                used_ffmpeg: outcome.used_ffmpeg,
             }
         }
         Err(error) => UploadRecord {
@@ -112,20 +139,116 @@ pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<Upl
             page_id: None,
             page_url: None,
             message: Some(error.to_string()),
+            display_mode,
+            segment_count: 0,
+            used_ffmpeg: false,
         },
     };
 
     storage::append_upload_record(app, record.clone())?;
+    emit_progress(app, 1, 1, "上传任务结束", record.message.as_deref().unwrap_or(""));
     Ok(record)
 }
 
-async fn upload_to_notion(
-    path: &Path,
+#[allow(clippy::too_many_arguments)]
+async fn prepare_and_upload(
+    app: &AppHandle,
+    file_path: &Path,
     file_name: &str,
     mime_type: &str,
     size: u64,
     sha256: &str,
     root_page_id: &str,
+    display_mode: &str,
+    is_video: bool,
+) -> Result<UploadOutcome> {
+    if display_mode == "video" && !is_video {
+        anyhow::bail!("只有视频文件可以使用“视频块”保存模式");
+    }
+
+    if size <= MAX_NOTION_FILE_SIZE {
+        let asset = UploadAsset {
+            path: file_path.to_path_buf(),
+            file_name: file_name.to_string(),
+            mime_type: mime_type.to_string(),
+            size,
+        };
+        let page = upload_assets_to_notion(
+            app,
+            &[asset],
+            file_path,
+            file_name,
+            mime_type,
+            size,
+            sha256,
+            root_page_id,
+            display_mode,
+        )
+        .await?;
+        return Ok(UploadOutcome {
+            page,
+            segment_count: 1,
+            used_ffmpeg: false,
+        });
+    }
+
+    if !is_video {
+        anyhow::bail!("文件超过 Notion 的 5 GiB 单文件上限；当前仅视频可通过 ffmpeg 自动切分");
+    }
+
+    let split = ffmpeg::split_video(app, file_path, size).await?;
+    let mut assets = Vec::with_capacity(split.parts.len());
+    for part in &split.parts {
+        let part_metadata = tokio::fs::metadata(part)
+            .await
+            .context("无法读取视频分段信息")?;
+        if part_metadata.len() > MAX_NOTION_FILE_SIZE {
+            anyhow::bail!("视频切分结果仍有分段超过 5 GiB");
+        }
+        assets.push(UploadAsset {
+            path: part.clone(),
+            file_name: part
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("video-segment.mkv")
+                .to_string(),
+            mime_type: "video/x-matroska".to_string(),
+            size: part_metadata.len(),
+        });
+    }
+
+    let segment_count = assets.len();
+    let page = upload_assets_to_notion(
+        app,
+        &assets,
+        file_path,
+        file_name,
+        mime_type,
+        size,
+        sha256,
+        root_page_id,
+        display_mode,
+    )
+    .await?;
+
+    Ok(UploadOutcome {
+        page,
+        segment_count,
+        used_ffmpeg: true,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_assets_to_notion(
+    app: &AppHandle,
+    assets: &[UploadAsset],
+    original_path: &Path,
+    page_title: &str,
+    original_mime_type: &str,
+    original_size: u64,
+    sha256: &str,
+    root_page_id: &str,
+    display_mode: &str,
 ) -> Result<CreatedPage> {
     let token = storage::load_token()?;
     let notion = NotionClient::new(token.clone())?;
@@ -137,27 +260,65 @@ async fn upload_to_notion(
     }
 
     let page = notion
-        .create_document_page(parent_page_id(root_page_id), file_name)
+        .create_document_page(parent_page_id(root_page_id), page_title)
         .await
         .map_err(|error| create_page_error(root_page_id, error))?;
 
     let write_result = async {
-        let upload_id = upload_file(&token, path, file_name, mime_type, size).await?;
-        let mut blocks = vec![
-            metadata_callout(&path.to_string_lossy(), mime_type, size, sha256),
-            file_block(&upload_id, mime_type),
-        ];
+        let mut blocks = vec![metadata_callout(
+            &original_path.to_string_lossy(),
+            original_mime_type,
+            original_size,
+            sha256,
+        )];
 
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if TEXT_EXTENSIONS.contains(&extension.as_str()) && size <= MAX_INLINE_TEXT_SIZE {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
+        if assets.len() > 1 {
+            blocks.push(divider_block());
+        }
+
+        for (index, asset) in assets.iter().enumerate() {
+            emit_progress(
+                app,
+                index + 1,
+                assets.len(),
+                "正在上传文件到 Notion",
+                &format!("{}（{}/{}）", asset.file_name, index + 1, assets.len()),
+            );
+            let upload_id = upload_file(app, &token, asset, index + 1, assets.len()).await?;
+
+            if assets.len() > 1 {
+                blocks.push(heading_block(&format!(
+                    "视频分段 {:02}/{}",
+                    index + 1,
+                    assets.len()
+                )));
+            }
+            blocks.push(upload_display_block(
+                &upload_id,
+                &asset.mime_type,
+                display_mode,
+            ));
+            if index + 1 < assets.len() {
                 blocks.push(divider_block());
-                blocks.push(heading_block("内容预览"));
-                blocks.extend(text_blocks(&content, &extension));
+            }
+        }
+
+        if assets.len() == 1 {
+            let asset = &assets[0];
+            let extension = asset
+                .path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if TEXT_EXTENSIONS.contains(&extension.as_str())
+                && asset.size <= MAX_INLINE_TEXT_SIZE
+            {
+                if let Ok(content) = tokio::fs::read_to_string(&asset.path).await {
+                    blocks.push(divider_block());
+                    blocks.push(heading_block("内容预览"));
+                    blocks.extend(text_blocks(&content, &extension));
+                }
             }
         }
 
@@ -174,50 +335,44 @@ async fn upload_to_notion(
 }
 
 async fn upload_file(
+    app: &AppHandle,
     token: &str,
-    path: &Path,
-    file_name: &str,
-    mime_type: &str,
-    size: u64,
+    asset: &UploadAsset,
+    asset_number: usize,
+    asset_total: usize,
 ) -> Result<String> {
     let client = Client::builder()
         .user_agent("notion-file/0.3.0")
         .build()
         .context("无法初始化文件上传客户端")?;
 
-    if size <= MAX_SINGLE_PART_SIZE {
-        upload_single_part(&client, token, path, file_name, mime_type).await
+    if asset.size <= MAX_SINGLE_PART_SIZE {
+        upload_single_part(&client, token, asset).await
     } else {
-        upload_multi_part(&client, token, path, file_name, mime_type, size).await
+        upload_multi_part(app, &client, token, asset, asset_number, asset_total).await
     }
 }
 
-async fn upload_single_part(
-    client: &Client,
-    token: &str,
-    path: &Path,
-    file_name: &str,
-    mime_type: &str,
-) -> Result<String> {
+async fn upload_single_part(client: &Client, token: &str, asset: &UploadAsset) -> Result<String> {
     let created = create_upload(
         client,
         token,
         json!({
             "mode": "single_part",
-            "filename": file_name,
-            "content_type": mime_type
+            "filename": asset.file_name,
+            "content_type": asset.mime_type
         }),
     )
     .await?;
     let upload_id = upload_id(&created)?.to_string();
     let upload_url = upload_url(&created, &upload_id);
 
-    let bytes = tokio::fs::read(path)
+    let bytes = tokio::fs::read(&asset.path)
         .await
         .context("无法读取待上传文件")?;
     let part = multipart::Part::bytes(bytes)
-        .file_name(file_name.to_string())
-        .mime_str(mime_type)?;
+        .file_name(asset.file_name.clone())
+        .mime_str(&asset.mime_type)?;
     let uploaded = parse_response(
         client
             .post(upload_url)
@@ -234,22 +389,22 @@ async fn upload_single_part(
 }
 
 async fn upload_multi_part(
+    app: &AppHandle,
     client: &Client,
     token: &str,
-    path: &Path,
-    file_name: &str,
-    mime_type: &str,
-    size: u64,
+    asset: &UploadAsset,
+    asset_number: usize,
+    asset_total: usize,
 ) -> Result<String> {
-    let number_of_parts = part_count(size);
+    let number_of_parts = part_count(asset.size);
     let created = create_upload(
         client,
         token,
         json!({
             "mode": "multi_part",
             "number_of_parts": number_of_parts,
-            "filename": file_name,
-            "content_type": mime_type
+            "filename": asset.file_name,
+            "content_type": asset.mime_type
         }),
     )
     .await?;
@@ -261,21 +416,21 @@ async fn upload_multi_part(
         .map(str::to_owned)
         .unwrap_or_else(|| format!("{NOTION_BASE_URL}/file_uploads/{upload_id}/complete"));
 
-    let mut file = tokio::fs::File::open(path)
+    let mut file = tokio::fs::File::open(&asset.path)
         .await
         .context("无法打开待分片上传文件")?;
-    let mut remaining = size;
+    let mut remaining = asset.size;
 
     for part_number in 1..=number_of_parts {
         let current_size = remaining.min(MULTI_PART_SIZE) as usize;
         let mut bytes = vec![0_u8; current_size];
         file.read_exact(&mut bytes)
             .await
-            .with_context(|| format!("读取第 {part_number}/{number_of_parts} 个分片失败"))?;
+            .with_context(|| format!("读取第 {part_number}/{number_of_parts} 个 API 分片失败"))?;
 
         let part = multipart::Part::bytes(bytes)
-            .file_name(file_name.to_string())
-            .mime_str(mime_type)?;
+            .file_name(asset.file_name.clone())
+            .mime_str(&asset.mime_type)?;
         parse_response(
             client
                 .post(&upload_url)
@@ -289,13 +444,24 @@ async fn upload_multi_part(
                 .send()
                 .await
                 .with_context(|| {
-                    format!("发送第 {part_number}/{number_of_parts} 个分片失败")
+                    format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
                 })?,
         )
         .await
-        .with_context(|| format!("第 {part_number}/{number_of_parts} 个分片被 Notion 拒绝"))?;
+        .with_context(|| {
+            format!("第 {part_number}/{number_of_parts} 个 API 分片被 Notion 拒绝")
+        })?;
 
         remaining -= current_size as u64;
+        emit_progress(
+            app,
+            part_number as usize,
+            number_of_parts as usize,
+            "正在分片上传到 Notion",
+            &format!(
+                "视频段 {asset_number}/{asset_total} · API 分片 {part_number}/{number_of_parts}"
+            ),
+        );
     }
 
     let completed = parse_response(
@@ -346,6 +512,20 @@ async fn parse_response(response: Response) -> Result<Value> {
     serde_json::from_str(&text).context("Notion 文件上传接口返回了无效 JSON")
 }
 
+fn upload_display_block(upload_id: &str, mime_type: &str, display_mode: &str) -> Value {
+    let block_type = if display_mode == "video" && mime_type.starts_with("video/") {
+        "video"
+    } else {
+        "file"
+    };
+    let mut block = json!({ "object": "block", "type": block_type });
+    block[block_type] = json!({
+        "type": "file_upload",
+        "file_upload": { "id": upload_id }
+    });
+    block
+}
+
 fn upload_id(value: &Value) -> Result<&str> {
     value
         .get("id")
@@ -394,6 +574,24 @@ async fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn is_video_file(path: &Path, mime_type: &str) -> bool {
+    if mime_type.starts_with("video/") || mime_type == "application/mp4" {
+        return true;
+    }
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| VIDEO_EXTENSIONS.contains(&value.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn normalize_display_mode(value: &str) -> &str {
+    if value.trim().eq_ignore_ascii_case("video") {
+        "video"
+    } else {
+        "file"
+    }
+}
+
 fn parent_page_id(value: &str) -> Option<&str> {
     if value.trim().is_empty() {
         None
@@ -412,9 +610,25 @@ fn create_page_error(root_page_id: &str, error: anyhow::Error) -> anyhow::Error 
     }
 }
 
+fn emit_progress(app: &AppHandle, current: usize, total: usize, stage: &str, detail: &str) {
+    let _ = app.emit(
+        "upload-progress",
+        UploadProgress {
+            current,
+            total,
+            stage: stage.to_string(),
+            detail: detail.to_string(),
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parent_page_id, part_count, MAX_SINGLE_PART_SIZE, MULTI_PART_SIZE};
+    use super::{
+        is_video_file, normalize_display_mode, parent_page_id, part_count, MAX_SINGLE_PART_SIZE,
+        MULTI_PART_SIZE,
+    };
+    use std::path::Path;
 
     #[test]
     fn trims_optional_parent_page_id() {
@@ -427,5 +641,17 @@ mod tests {
         assert_eq!(part_count(MAX_SINGLE_PART_SIZE + 1), 3);
         assert_eq!(part_count(MULTI_PART_SIZE * 3), 3);
         assert_eq!(part_count(MULTI_PART_SIZE * 3 + 1), 4);
+    }
+
+    #[test]
+    fn defaults_to_file_mode() {
+        assert_eq!(normalize_display_mode("video"), "video");
+        assert_eq!(normalize_display_mode("anything"), "file");
+    }
+
+    #[test]
+    fn detects_video_extensions() {
+        assert!(is_video_file(Path::new("movie.mkv"), "application/octet-stream"));
+        assert!(!is_video_file(Path::new("document.pdf"), "application/pdf"));
     }
 }
