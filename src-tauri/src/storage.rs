@@ -1,3 +1,4 @@
+use crate::database;
 use crate::models::{AppConfig, SyncState, UploadRecord};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -5,7 +6,6 @@ use tauri::{AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.weepwood.notionfile";
 const KEYRING_ACCOUNT: &str = "notion-token";
-const MAX_UPLOAD_HISTORY: usize = 500;
 
 fn ensure_parent(path: &PathBuf) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -57,30 +57,18 @@ pub fn save_state(app: &AppHandle, state: &SyncState) -> Result<()> {
 }
 
 pub fn load_upload_history(app: &AppHandle) -> Result<Vec<UploadRecord>> {
-    let path = upload_history_path(app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = std::fs::read_to_string(&path).context("无法读取上传记录")?;
-    serde_json::from_str(&content).context("上传记录文件格式无效")
-}
-
-fn save_upload_history(app: &AppHandle, records: &[UploadRecord]) -> Result<()> {
-    let path = upload_history_path(app)?;
-    ensure_parent(&path)?;
-    std::fs::write(path, serde_json::to_string_pretty(records)?)
-        .context("无法保存上传记录")
+    let legacy_path = upload_history_path(app)?;
+    database::load_upload_history(app, &legacy_path)
 }
 
 pub fn append_upload_record(app: &AppHandle, record: UploadRecord) -> Result<()> {
-    let mut records = load_upload_history(app)?;
-    records.insert(0, record);
-    records.truncate(MAX_UPLOAD_HISTORY);
-    save_upload_history(app, &records)
+    let legacy_path = upload_history_path(app)?;
+    database::append_upload_record(app, &legacy_path, &record)
 }
 
 pub fn clear_upload_history(app: &AppHandle) -> Result<()> {
-    save_upload_history(app, &[])
+    let legacy_path = upload_history_path(app)?;
+    database::clear_upload_history(app, &legacy_path)
 }
 
 fn token_entry() -> Result<keyring::Entry> {
