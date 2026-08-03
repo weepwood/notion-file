@@ -1,5 +1,5 @@
 use crate::database;
-use crate::models::{AppConfig, SyncState, UploadRecord};
+use crate::models::{AppConfig, DriveNode, DriveTransfer, SyncState, UploadRecord};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -69,6 +69,54 @@ pub fn append_upload_record(app: &AppHandle, record: UploadRecord) -> Result<()>
 pub fn clear_upload_history(app: &AppHandle) -> Result<()> {
     let legacy_path = upload_history_path(app)?;
     database::clear_upload_history(app, &legacy_path)
+}
+
+pub fn list_drive_nodes(app: &AppHandle, include_trashed: bool) -> Result<Vec<DriveNode>> {
+    database::list_drive_nodes(app, include_trashed)
+}
+
+pub fn get_drive_node(app: &AppHandle, node_id: &str) -> Result<DriveNode> {
+    database::get_drive_node(app, node_id)
+}
+
+pub fn insert_drive_node(app: &AppHandle, node: &DriveNode) -> Result<()> {
+    database::insert_drive_node(app, node)
+}
+
+pub fn update_drive_nodes(app: &AppHandle, nodes: &[DriveNode]) -> Result<()> {
+    database::update_drive_nodes(app, nodes)
+}
+
+pub fn replace_drive_nodes(app: &AppHandle, nodes: &[DriveNode]) -> Result<()> {
+    database::replace_drive_nodes(app, nodes)
+}
+
+pub fn find_drive_file_by_hash(app: &AppHandle, sha256: &str) -> Result<Option<DriveNode>> {
+    database::find_drive_file_by_hash(app, sha256)
+}
+
+pub fn list_drive_subtree(app: &AppHandle, root_id: &str) -> Result<Vec<DriveNode>> {
+    database::list_drive_subtree(app, root_id)
+}
+
+pub fn append_drive_transfer(app: &AppHandle, transfer: &DriveTransfer) -> Result<()> {
+    database::append_drive_transfer(app, transfer)
+}
+
+pub fn update_drive_transfer(app: &AppHandle, transfer: &DriveTransfer) -> Result<()> {
+    database::update_drive_transfer(app, transfer)
+}
+
+pub fn list_drive_transfers(app: &AppHandle) -> Result<Vec<DriveTransfer>> {
+    database::list_drive_transfers(app)
+}
+
+pub fn mark_interrupted_transfers(app: &AppHandle, updated_at: &str) -> Result<usize> {
+    database::mark_interrupted_transfers(app, updated_at)
+}
+
+pub fn clear_finished_drive_transfers(app: &AppHandle) -> Result<usize> {
+    database::clear_finished_drive_transfers(app)
 }
 
 fn token_entry() -> Result<keyring::Entry> {

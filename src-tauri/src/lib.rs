@@ -1,4 +1,5 @@
 mod database;
+mod drive;
 mod ffmpeg;
 mod file_upload;
 mod models;
@@ -10,7 +11,8 @@ mod syncer;
 mod uploader;
 
 use models::{
-    AppConfig, FfmpegStatus, ScanResult, SingleUploadRequest, SyncRequest, SyncResult,
+    AppConfig, DriveDownloadRequest, DriveInitResult, DriveNode, DriveTransfer,
+    DriveUploadRequest, FfmpegStatus, ScanResult, SingleUploadRequest, SyncRequest, SyncResult,
     UploadRecord,
 };
 use tauri::AppHandle;
@@ -112,6 +114,107 @@ async fn sync_folder(app: AppHandle, request: SyncRequest) -> Result<SyncResult,
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn initialize_drive(
+    app: AppHandle,
+    root_page_id: String,
+) -> Result<DriveInitResult, String> {
+    drive::initialize(&app, root_page_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn refresh_drive_index(app: AppHandle) -> Result<Vec<DriveNode>, String> {
+    drive::refresh_index(&app)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_drive_nodes(app: AppHandle, include_trashed: bool) -> Result<Vec<DriveNode>, String> {
+    drive::list_nodes(&app, include_trashed).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn create_drive_folder(
+    app: AppHandle,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<DriveNode, String> {
+    drive::create_folder(&app, name, parent_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn upload_drive_file(
+    app: AppHandle,
+    request: DriveUploadRequest,
+) -> Result<DriveNode, String> {
+    drive::upload_file(&app, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn download_drive_file(
+    app: AppHandle,
+    request: DriveDownloadRequest,
+) -> Result<DriveTransfer, String> {
+    drive::download_file(&app, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn rename_drive_node(
+    app: AppHandle,
+    node_id: String,
+    new_name: String,
+) -> Result<DriveNode, String> {
+    drive::rename_node(&app, node_id, new_name)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn move_drive_node(
+    app: AppHandle,
+    node_id: String,
+    new_parent_id: Option<String>,
+) -> Result<DriveNode, String> {
+    drive::move_node(&app, node_id, new_parent_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_drive_node_trashed(
+    app: AppHandle,
+    node_id: String,
+    trashed: bool,
+) -> Result<usize, String> {
+    drive::set_trashed(&app, node_id, trashed)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_drive_transfers(app: AppHandle) -> Result<Vec<DriveTransfer>, String> {
+    drive::list_transfers(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_finished_drive_transfers(app: AppHandle) -> Result<usize, String> {
+    drive::clear_finished_transfers(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn disconnect_drive(app: AppHandle) -> Result<(), String> {
+    drive::disconnect(&app).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -128,6 +231,18 @@ pub fn run() {
             test_notion_connection,
             scan_folder,
             sync_folder,
+            initialize_drive,
+            refresh_drive_index,
+            get_drive_nodes,
+            create_drive_folder,
+            upload_drive_file,
+            download_drive_file,
+            rename_drive_node,
+            move_drive_node,
+            set_drive_node_trashed,
+            get_drive_transfers,
+            clear_finished_drive_transfers,
+            disconnect_drive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
