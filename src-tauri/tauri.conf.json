@@ -32,8 +32,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "将本地文件上传并同步到 Notion",
-    "longDescription": "使用 Tauri 2、React 与 Rust 构建的单文件上传与本地文件夹到 Notion 同步工具。",
+    "shortDescription": "上传本地文件并同步文件夹到 Notion",
+    "longDescription": "支持单文件、分片上传、ffmpeg 超大视频切分，以及本地文件夹到 Notion 的单向同步。",
     "windows": {
       "wix": null,
       "nsis": { "installMode": "currentUser" }
