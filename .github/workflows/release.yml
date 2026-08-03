@@ -75,7 +75,7 @@ jobs:
             git push origin $env:TAG
           }
 
-          $assets = Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
           if ($assets.Count -eq 0) {
             throw "No NSIS installer was generated."
           }
