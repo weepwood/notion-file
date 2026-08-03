@@ -9,6 +9,7 @@ use crate::storage;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tauri::AppHandle;
 
 pub(super) fn list_versions(app: &AppHandle, node_id: String) -> Result<Vec<DriveVersion>> {
@@ -24,6 +25,7 @@ pub(super) async fn upload_version(
     app: &AppHandle,
     request: DriveVersionUploadRequest,
 ) -> Result<DriveNode> {
+    let operation_started = Instant::now();
     let mut node = storage::get_drive_node(app, &request.node_id)?;
     if node.node_type != "file" || !node.is_active() {
         anyhow::bail!("只能为正常状态的文件上传新版本");
@@ -61,52 +63,98 @@ pub(super) async fn upload_version(
         updated_at: now,
     };
     storage::append_drive_transfer(app, &transfer_record)?;
-    transfer::emit_progress(
+    transfer::emit_progress_detailed(
         app,
         &transfer_record,
         "正在计算新版本 SHA-256",
         0,
         size,
+        transfer::ProgressDetails {
+            stage_code: "hashing".to_string(),
+            ..transfer::ProgressDetails::default()
+        },
     );
 
-    let result: Result<DriveNode> = async {
+    let result: Result<(DriveNode, transfer::UploadDiagnostics)> = async {
         version_store::ensure_current_version(app, &node)?;
-        let sha256 = transfer::hash_file(&canonical_path).await?;
+        let hash_started = Instant::now();
+        let app_for_hash = app.clone();
+        let record_for_hash = transfer_record.clone();
+        let operation_for_hash = operation_started;
+        let sha256 = transfer::hash_file_with_progress(&canonical_path, move |processed, total| {
+            let elapsed_ms = hash_started.elapsed().as_millis() as u64;
+            let speed = processed as f64 / (elapsed_ms as f64 / 1_000.0).max(0.001);
+            transfer::emit_progress_detailed(
+                &app_for_hash,
+                &record_for_hash,
+                "正在计算新版本 SHA-256（本地处理）",
+                processed,
+                total,
+                transfer::ProgressDetails {
+                    stage_code: "hashing".to_string(),
+                    current_speed_bytes_per_second: speed,
+                    average_speed_bytes_per_second: speed,
+                    elapsed_ms: operation_for_hash.elapsed().as_millis() as u64,
+                    stage_elapsed_ms: elapsed_ms,
+                    diagnostic_hint: Some("当前阶段只读取本地文件，不占用上传带宽".to_string()),
+                    ..transfer::ProgressDetails::default()
+                },
+            );
+        })
+        .await?;
+        let processing_ms = hash_started.elapsed().as_millis() as u64;
         let context = drive_context(app)?;
         let reusable_upload_id = storage::find_drive_file_by_hash(app, &sha256)?
             .and_then(|item| item.file_upload_id);
-        let file_upload_id = if let Some(upload_id) = reusable_upload_id {
-            transfer::emit_progress(
+        let reporter = transfer::UploadProgressReporter::new(app, &transfer_record, operation_started);
+        let network_started = Instant::now();
+        let (file_upload_id, reused_remote_file) = if let Some(upload_id) = reusable_upload_id {
+            transfer::emit_progress_detailed(
                 app,
                 &transfer_record,
                 "检测到重复内容，复用远端附件",
                 size,
                 size,
+                transfer::ProgressDetails {
+                    stage_code: "deduplicated".to_string(),
+                    elapsed_ms: operation_started.elapsed().as_millis() as u64,
+                    diagnostic_hint: Some("已跳过文件网络上传，只追加新的版本区块".to_string()),
+                    ..transfer::ProgressDetails::default()
+                },
             );
-            upload_id
+            (upload_id, true)
         } else {
-            let app_handle = app.clone();
-            let progress_record = transfer_record.clone();
-            file_upload::upload_file(
+            let report = reporter.clone();
+            let upload_id = file_upload::upload_file_with_progress(
                 &context.http,
                 &canonical_path,
                 &upload_name,
                 &mime_type,
                 size,
-                move |part, total| {
-                    let transferred = (part * file_upload::MULTI_PART_SIZE).min(size);
-                    transfer::emit_progress(
-                        &app_handle,
-                        &progress_record,
-                        &format!("正在上传版本分片 {part}/{total}"),
-                        transferred,
-                        size,
-                    );
-                },
+                move |event| report.report(event),
             )
-            .await?
+            .await?;
+            (upload_id, false)
         };
-
+        let network_ms = if reused_remote_file { 0 } else { network_started.elapsed().as_millis() as u64 };
+        let (endpoint_url, endpoint_host, average_speed) = reporter.snapshot();
+        let remote_started = Instant::now();
+        transfer::emit_progress_detailed(
+            app,
+            &transfer_record,
+            "正在写入 Notion 版本索引",
+            size,
+            size,
+            transfer::ProgressDetails {
+                stage_code: "notion_index".to_string(),
+                average_speed_bytes_per_second: average_speed,
+                elapsed_ms: operation_started.elapsed().as_millis() as u64,
+                endpoint_url: endpoint_url.clone(),
+                endpoint_host: endpoint_host.clone(),
+                diagnostic_hint: Some("文件内容已上传，当前等待版本区块与远端索引更新".to_string()),
+                ..transfer::ProgressDetails::default()
+            },
+        );
         let block_id = notion_index::append_file_block(
             &context.http,
             &node.notion_page_id,
@@ -128,7 +176,6 @@ pub(super) async fn upload_version(
             original_path: Some(canonical_path.to_string_lossy().to_string()),
             created_at: modified_at.clone(),
         };
-
         node.version = next_version;
         node.size = size;
         node.sha256 = Some(sha256);
@@ -140,29 +187,46 @@ pub(super) async fn upload_version(
         notion_index::patch_remote_node(&context.http, &node).await?;
         storage::insert_drive_node(app, &node)?;
         version_store::upsert_version(app, &version)?;
-        Ok(node)
+        let diagnostics = transfer::diagnose_upload(
+            endpoint_url,
+            endpoint_host,
+            average_speed,
+            processing_ms,
+            network_ms,
+            remote_started.elapsed().as_millis() as u64,
+            operation_started.elapsed().as_millis() as u64,
+            reused_remote_file,
+        );
+        Ok((node, diagnostics))
     }
     .await;
 
     match result {
-        Ok(updated) => {
+        Ok((updated, diagnostics)) => {
             transfer_record.status = "completed".to_string();
             transfer_record.transferred_bytes = size;
-            transfer_record.message = Some(format!("版本 v{} 上传完成", updated.version));
+            transfer_record.message = Some(format!(
+                "版本 v{} · {}",
+                updated.version,
+                transfer::upload_summary(&diagnostics)
+            ));
             transfer_record.updated_at = Utc::now().to_rfc3339();
             storage::update_drive_transfer(app, &transfer_record)?;
-            transfer::emit_progress(
+            transfer::emit_completed_upload(
                 app,
                 &transfer_record,
                 "新版本上传完成",
                 size,
-                size,
+                &diagnostics,
             );
             Ok(updated)
         }
         Err(error) => {
             transfer_record.status = "failed".to_string();
-            transfer_record.message = Some(error.to_string());
+            transfer_record.message = Some(format!(
+                "{error} · 已耗时 {}",
+                transfer::format_duration(operation_started.elapsed().as_millis() as u64)
+            ));
             transfer_record.updated_at = Utc::now().to_rfc3339();
             storage::update_drive_transfer(app, &transfer_record)?;
             Err(error)

@@ -66,6 +66,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function formatRate(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 B/s";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatDuration(milliseconds: number): string {
+  if (!milliseconds) return "0 ms";
+  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
+  const seconds = milliseconds / 1000;
+  return seconds < 60 ? `${seconds.toFixed(1)} s` : `${(seconds / 60).toFixed(1)} min`;
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -624,7 +636,7 @@ export default function App() {
       <aside className="drive-sidebar">
         <div className="brand">
           <div className="brand-icon"><Cloud size={22} /></div>
-          <div><strong>Notion File</strong><span>个人云盘 · v0.6.0</span></div>
+          <div><strong>Notion File</strong><span>个人云盘 · v0.6.1</span></div>
         </div>
         <nav>
           <button className={view === "drive" ? "active" : ""} onClick={() => setView("drive")}><HardDrive size={17} />我的云盘</button>
@@ -646,7 +658,21 @@ export default function App() {
 
         <div className="drive-content">
           {notice && <div className={`notice ${notice.type}`}>{notice.type === "error" ? <AlertCircle size={18} /> : notice.type === "success" ? <CheckCircle2 size={18} /> : <Cloud size={18} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={15} /></button></div>}
-          {progress && busy && <div className="transfer-banner"><div>{progress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}<span><strong>{progress.fileName}</strong><small>{progress.stage}</small></span></div><div className="progress-meta">{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</div><div className="progress-track"><div style={{ width: `${progressPercent}%` }} /></div></div>}
+          {progress && busy && <div className="transfer-banner diagnostic-banner">
+            <div className="diagnostic-title"><div>{progress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}<span><strong>{progress.fileName}</strong><small>{progress.stage}</small></span></div><div className="progress-meta">{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</div></div>
+            <div className="progress-track"><div style={{ width: `${progressPercent}%` }} /></div>
+            {progress.direction === "upload" && <>
+              <div className="diagnostic-metrics">
+                <div><span>{progress.stageCode === "hashing" ? "本地处理速度" : "当前上传速度（估算）"}</span><strong>{formatRate(progress.currentSpeedBytesPerSecond)}</strong></div>
+                <div><span>{progress.stageCode === "hashing" ? "平均处理速度" : "平均有效速度（估算）"}</span><strong>{formatRate(progress.averageSpeedBytesPerSecond)}</strong></div>
+                <div><span>当前阶段耗时</span><strong>{formatDuration(progress.stageElapsedMs)}</strong></div>
+                <div><span>总耗时</span><strong>{formatDuration(progress.elapsedMs)}</strong></div>
+                {progress.currentPart && progress.totalParts && <div><span>API 分片</span><strong>{progress.currentPart} / {progress.totalParts}</strong></div>}
+              </div>
+              {progress.endpointUrl && <div className="endpoint-row"><span>上传网址</span><code title={progress.endpointUrl}>{progress.endpointUrl}</code></div>}
+              {progress.diagnosticHint && <div className="diagnostic-hint"><AlertCircle size={15} /><span>{progress.diagnosticHint}</span></div>}
+            </>}
+          </div>}
 
           {view === "drive" && (
             <section>
@@ -662,11 +688,11 @@ export default function App() {
             </section>
           )}
 
-          {view === "transfers" && <section><div className="section-heading"><div><h1>传输中心</h1><p>下载失败会保留 .part 临时文件，可从已完成字节继续。</p></div><button onClick={clearTransfers}><Trash2 size={15} />清理已结束记录</button></div><div className="transfer-list">{transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => { const percent = transfer.totalBytes ? Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)) : 0; const resumable = transfer.direction === "download" && transfer.status === "failed" && Boolean(transfer.localPath) && Boolean(transfer.nodeId); return <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}><i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i><div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message ?? transfer.localPath ?? ""}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div><div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div><em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>{resumable && <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}><RefreshCw size={12} />续传</button>}</div>; })}</div></section>}
+          {view === "transfers" && <section><div className="section-heading"><div><h1>传输中心</h1><p>上传记录会保留平均速度、各阶段耗时和目标网址；下载失败会保留 .part 临时文件。</p></div><button onClick={clearTransfers}><Trash2 size={15} />清理已结束记录</button></div><div className="transfer-list">{transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => { const percent = transfer.totalBytes ? Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)) : 0; const resumable = transfer.direction === "download" && transfer.status === "failed" && Boolean(transfer.localPath) && Boolean(transfer.nodeId); return <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}><i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i><div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message ?? transfer.localPath ?? ""}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div><div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div><em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>{resumable && <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}><RefreshCw size={12} />续传</button>}</div>; })}</div></section>}
 
-          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div><div className="info-card"><AlertCircle size={18} /><div><strong>数据安全说明</strong><p>文件下载前会重新获取签名地址，支持 Range 续传，并在完成后使用 SHA-256 校验；断开本机索引不会删除 Notion 数据。</p></div></div></section>}
+          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div></section>}
 
-          {view === "legacy" && <section><div className="section-heading"><div><h1>传统上传与文件夹同步</h1><p>保留 v0.4.0 的原有上传和文件夹转文档能力。</p></div></div><div className="legacy-grid"><div className="legacy-card"><h2><Upload size={18} />单文件上传</h2><p>创建独立 Notion 页面并附加文件。</p><div className="path-display">{legacyFile || "尚未选择文件"}</div><div className="card-actions"><button onClick={chooseLegacyFile}>选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFile || Boolean(busy)}>上传</button></div></div><div className="legacy-card"><h2><FolderSync size={18} />文件夹转文档</h2><p>扫描本地文件夹并重建为一篇 Notion 文档。</p><div className="path-display">{config.folderPath || "尚未选择文件夹"}</div>{legacyScan && <small>已扫描 {legacyScan.files.length} 个文件，共 {formatBytes(legacyScan.totalBytes)}</small>}{legacyResult && <small>最近结果：创建 {legacyResult.created}，更新 {legacyResult.updated}，失败 {legacyResult.failed}</small>}<div className="card-actions"><button onClick={chooseLegacyFolder}>选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!config.folderPath || Boolean(busy)}>开始同步</button></div></div></div></section>}
+          {view === "legacy" && <section><div className="section-heading"><div><h1>传统上传与文件夹转文档</h1><p>保留 v0.4.0 的单文件页面和本地文件夹转 Notion 文档能力。</p></div></div><div className="legacy-grid"><div className="legacy-card"><h2>单文件上传</h2><p>{legacyFile || "选择文件后创建同名 Notion 页面。"}</p><div><button onClick={chooseLegacyFile}><FileText size={15} />选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFile || Boolean(busy)}><Upload size={15} />上传</button></div></div><div className="legacy-card"><h2>文件夹转文档</h2><p>{config.folderPath || "选择本地文件夹，扫描并整理为一篇 Notion 文档。"}</p><div><button onClick={chooseLegacyFolder}><FolderOpen size={15} />选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!legacyScan || Boolean(busy)}><FolderSync size={15} />开始同步</button></div>{legacyScan && <small>扫描 {legacyScan.files.length} 个文件，变化 {legacyScan.changedCount} 个，共 {formatBytes(legacyScan.totalBytes)}</small>}{legacyResult?.pageUrl && <button onClick={() => window.open(legacyResult.pageUrl, "_blank")}><ExternalLink size={14} />打开同步文档</button>}</div></div></section>}
         </div>
       </main>
     </div>

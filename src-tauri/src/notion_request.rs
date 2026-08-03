@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use futures_util::stream;
 use reqwest::{multipart, Client, Method, RequestBuilder, Response, StatusCode};
 use serde_json::Value;
+use std::io;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -10,6 +12,7 @@ pub const NOTION_VERSION: &str = "2026-03-11";
 const REQUEST_INTERVAL: Duration = Duration::from_millis(350);
 const MAX_ATTEMPTS: usize = 5;
 const MAX_BACKOFF: Duration = Duration::from_secs(16);
+const UPLOAD_STREAM_CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct NotionHttp {
@@ -79,6 +82,64 @@ impl NotionHttp {
         execute_with_retry(
             move || {
                 let file = multipart::Part::bytes(bytes.clone())
+                    .file_name(file_name.clone())
+                    .mime_str(&mime_type)?;
+                let mut form = multipart::Form::new().part("file", file);
+                if let Some(part_number) = part_number {
+                    form = form.text("part_number", part_number.to_string());
+                }
+                Ok(client
+                    .post(&url)
+                    .bearer_auth(token.as_ref())
+                    .header("Notion-Version", NOTION_VERSION)
+                    .header("Accept", "application/json")
+                    .multipart(form))
+            },
+            RetryPolicy::RateLimitOnly,
+        )
+        .await
+    }
+
+    pub async fn send_multipart_with_progress<F>(
+        &self,
+        url: impl Into<String>,
+        file_name: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        part_number: Option<u64>,
+        on_progress: F,
+    ) -> Result<Response>
+    where
+        F: Fn(u64) + Send + Sync + 'static,
+    {
+        let url = url.into();
+        let file_name = file_name.to_string();
+        let mime_type = mime_type.to_string();
+        let client = self.client.clone();
+        let token = self.token.clone();
+        let bytes = Arc::new(bytes);
+        let on_progress: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(on_progress);
+
+        execute_with_retry(
+            move || {
+                let stream_bytes = bytes.clone();
+                let stream_progress = on_progress.clone();
+                let content_length = stream_bytes.len() as u64;
+                let body_stream = stream::unfold(0usize, move |offset| {
+                    let bytes = stream_bytes.clone();
+                    let on_progress = stream_progress.clone();
+                    async move {
+                        if offset >= bytes.len() {
+                            return None;
+                        }
+                        let end = (offset + UPLOAD_STREAM_CHUNK_SIZE).min(bytes.len());
+                        let chunk = bytes[offset..end].to_vec();
+                        on_progress(end as u64);
+                        Some((Ok::<Vec<u8>, io::Error>(chunk), end))
+                    }
+                });
+                let body = reqwest::Body::wrap_stream(body_stream);
+                let file = multipart::Part::stream_with_length(body, content_length)
                     .file_name(file_name.clone())
                     .mime_str(&mime_type)?;
                 let mut form = multipart::Form::new().part("file", file);
