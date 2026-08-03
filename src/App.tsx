@@ -76,21 +76,15 @@ function formatDate(value: string): string {
   }).format(date);
 }
 
-function fileName(path: string): string {
+function localName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
 
-function progressPercent(progress?: DriveTransferProgress | null): number {
-  if (!progress?.totalBytes) return 0;
-  return Math.min(100, Math.round((progress.transferredBytes / progress.totalBytes) * 100));
-}
-
 function nodeIcon(node: DriveNode) {
-  if (node.nodeType === "folder") return <Folder size={18} />;
-  return <FileText size={18} />;
+  return node.nodeType === "folder" ? <Folder size={18} /> : <FileText size={18} />;
 }
 
-function statusLabel(status: DriveTransfer["status"]): string {
+function transferLabel(status: DriveTransfer["status"]): string {
   return {
     queued: "等待中",
     running: "传输中",
@@ -107,87 +101,95 @@ export default function App() {
   const [hasToken, setHasToken] = useState(false);
   const [nodes, setNodes] = useState<DriveNode[]>([]);
   const [transfers, setTransfers] = useState<DriveTransfer[]>([]);
-  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [folderId, setFolderId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [showTrash, setShowTrash] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [activeProgress, setActiveProgress] = useState<DriveTransferProgress | null>(null);
-
-  const [legacyFilePath, setLegacyFilePath] = useState("");
+  const [progress, setProgress] = useState<DriveTransferProgress | null>(null);
+  const [legacyFile, setLegacyFile] = useState("");
   const [legacyScan, setLegacyScan] = useState<ScanResult | null>(null);
   const [legacyResult, setLegacyResult] = useState<SyncResult | null>(null);
 
   const driveReady = Boolean(config.driveDataSourceId.trim());
   const credentialsReady = hasToken || Boolean(token.trim());
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
-  const currentFolder = nodes.find((node) => node.id === currentFolderId) || null;
+  const currentFolder = nodes.find((node) => node.id === folderId) ?? null;
+  const selected = nodes.find((node) => node.id === selectedId) ?? null;
 
   useEffect(() => {
-    Promise.all([
-      invoke<AppConfig>("get_saved_config"),
-      invoke<boolean>("has_saved_token"),
-      invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }).catch(() => []),
-      invoke<DriveTransfer[]>("get_drive_transfers").catch(() => []),
-    ])
-      .then(([saved, savedToken, savedNodes, savedTransfers]) => {
-        setConfig({ ...DEFAULT_CONFIG, ...saved });
-        setHasToken(savedToken);
-        setNodes(savedNodes);
-        setTransfers(savedTransfers);
-      })
-      .catch((error) => setNotice({ type: "error", text: String(error) }));
-
+    void loadLocalData();
     const unlisten = listen<DriveTransferProgress>("drive-transfer-progress", (event) => {
-      setActiveProgress(event.payload);
+      setProgress(event.payload);
     });
     return () => {
       void unlisten.then((dispose) => dispose());
     };
   }, []);
 
+  async function loadLocalData() {
+    try {
+      const [saved, savedToken, savedNodes, savedTransfers] = await Promise.all([
+        invoke<AppConfig>("get_saved_config"),
+        invoke<boolean>("has_saved_token"),
+        invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }).catch(() => []),
+        invoke<DriveTransfer[]>("get_drive_transfers").catch(() => []),
+      ]);
+      setConfig({ ...DEFAULT_CONFIG, ...saved });
+      setHasToken(savedToken);
+      setNodes(savedNodes);
+      setTransfers(savedTransfers);
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
+    }
+  }
+
+  async function refreshLocal() {
+    const [savedNodes, savedTransfers, savedConfig] = await Promise.all([
+      invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }),
+      invoke<DriveTransfer[]>("get_drive_transfers"),
+      invoke<AppConfig>("get_saved_config"),
+    ]);
+    setNodes(savedNodes);
+    setTransfers(savedTransfers);
+    setConfig({ ...DEFAULT_CONFIG, ...savedConfig });
+  }
+
   const breadcrumbs = useMemo(() => {
     const result: DriveNode[] = [];
-    let cursor = currentFolder;
+    let cursor: DriveNode | null = currentFolder;
     const visited = new Set<string>();
     while (cursor && !visited.has(cursor.id)) {
       visited.add(cursor.id);
       result.unshift(cursor);
       cursor = cursor.parentId
-        ? nodes.find((node) => node.id === cursor?.parentId) || undefined
-        : undefined;
+        ? nodes.find((node) => node.id === cursor?.parentId) ?? null
+        : null;
     }
     return result;
   }, [currentFolder, nodes]);
 
   const visibleNodes = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    if (showTrash) {
-      return nodes
-        .filter((node) => node.status === "trashed")
-        .filter(
-          (node) =>
-            !normalizedQuery ||
-            node.name.toLocaleLowerCase().includes(normalizedQuery) ||
-            node.logicalPath.toLocaleLowerCase().includes(normalizedQuery),
-        );
-    }
-    if (normalizedQuery) {
-      return nodes.filter(
-        (node) =>
-          node.status === "active" &&
-          (node.name.toLocaleLowerCase().includes(normalizedQuery) ||
-            node.logicalPath.toLocaleLowerCase().includes(normalizedQuery)),
-      );
-    }
-    return nodes.filter(
-      (node) => node.status === "active" && (node.parentId || null) === currentFolderId,
-    );
-  }, [nodes, query, showTrash, currentFolderId]);
+    const text = query.trim().toLocaleLowerCase();
+    return nodes
+      .filter((node) => (showTrash ? node.status === "trashed" : node.status === "active"))
+      .filter((node) => {
+        if (text) {
+          return (
+            node.name.toLocaleLowerCase().includes(text) ||
+            node.logicalPath.toLocaleLowerCase().includes(text)
+          );
+        }
+        return showTrash || (node.parentId ?? null) === folderId;
+      })
+      .sort((left, right) => {
+        if (left.nodeType !== right.nodeType) return left.nodeType === "folder" ? -1 : 1;
+        return left.name.localeCompare(right.name, "zh-CN");
+      });
+  }, [folderId, nodes, query, showTrash]);
 
-  const activeFolders = useMemo(
-    () => nodes.filter((node) => node.status === "active" && node.nodeType === "folder"),
+  const folders = useMemo(
+    () => nodes.filter((node) => node.nodeType === "folder" && node.status === "active"),
     [nodes],
   );
 
@@ -196,26 +198,12 @@ export default function App() {
     return {
       files: active.filter((node) => node.nodeType === "file").length,
       folders: active.filter((node) => node.nodeType === "folder").length,
-      bytes: active.reduce((sum, node) => sum + node.size, 0),
+      bytes: active.reduce((total, node) => total + node.size, 0),
       trashed: nodes.filter((node) => node.status === "trashed").length,
     };
   }, [nodes]);
 
-  async function refreshLocalData(includeNotice = false) {
-    const [nextNodes, nextTransfers, nextConfig] = await Promise.all([
-      invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }),
-      invoke<DriveTransfer[]>("get_drive_transfers"),
-      invoke<AppConfig>("get_saved_config"),
-    ]);
-    setNodes(nextNodes);
-    setTransfers(nextTransfers);
-    setConfig({ ...DEFAULT_CONFIG, ...nextConfig });
-    if (includeNotice) {
-      setNotice({ type: "success", text: "本地云盘索引已刷新。" });
-    }
-  }
-
-  async function persistSettings() {
+  async function saveSettings() {
     if (token.trim()) {
       await invoke("save_notion_token", { token: token.trim() });
       setHasToken(true);
@@ -228,21 +216,14 @@ export default function App() {
     setBusy("initialize");
     setNotice(null);
     try {
-      await persistSettings();
+      await saveSettings();
       const result = await invoke<DriveInitResult>("initialize_drive", {
         rootPageId: config.rootPageId.trim(),
       });
-      setConfig((current) => ({
-        ...current,
-        driveDatabaseId: result.databaseId,
-        driveDataSourceId: result.dataSourceId,
-      }));
-      await refreshLocalData();
+      await refreshLocal();
       setNotice({
         type: "success",
-        text: result.created
-          ? `已创建 Notion Drive，共恢复 ${result.nodeCount} 个节点。`
-          : `已连接现有 Notion Drive，共恢复 ${result.nodeCount} 个节点。`,
+        text: `${result.created ? "已创建" : "已连接"} Notion Drive，恢复 ${result.nodeCount} 个节点。`,
       });
       setView("drive");
     } catch (error) {
@@ -252,14 +233,13 @@ export default function App() {
     }
   }
 
-  async function refreshRemoteIndex() {
+  async function refreshRemote() {
     setBusy("refresh");
-    setNotice(null);
     try {
-      const remoteNodes = await invoke<DriveNode[]>("refresh_drive_index");
-      setNodes(remoteNodes);
-      setSelectedNodeId(null);
-      setNotice({ type: "success", text: `远端索引重建完成，共 ${remoteNodes.length} 个节点。` });
+      const remote = await invoke<DriveNode[]>("refresh_drive_index");
+      setNodes(remote);
+      setSelectedId(null);
+      setNotice({ type: "success", text: `已从 Notion 重建 ${remote.length} 个节点。` });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
     } finally {
@@ -272,12 +252,12 @@ export default function App() {
     if (!name?.trim()) return;
     setBusy("folder");
     try {
-      const folder = await invoke<DriveNode>("create_drive_folder", {
+      await invoke<DriveNode>("create_drive_folder", {
         name: name.trim(),
-        parentId: currentFolderId,
+        parentId: folderId,
       });
-      setNodes((current) => [...current, folder]);
-      setNotice({ type: "success", text: `已创建文件夹：${folder.logicalPath}` });
+      await refreshLocal();
+      setNotice({ type: "success", text: `文件夹“${name.trim()}”已创建。` });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
     } finally {
@@ -285,56 +265,50 @@ export default function App() {
     }
   }
 
-  async function chooseAndUploadFiles() {
-    const selected = await open({
+  async function uploadFiles() {
+    const chosen = await open({
       directory: false,
       multiple: true,
       title: "选择需要上传到 Notion Drive 的文件",
     });
-    const paths = Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+    const paths = Array.isArray(chosen) ? chosen : typeof chosen === "string" ? [chosen] : [];
     if (!paths.length) return;
 
     setBusy("upload");
-    setNotice({ type: "info", text: `已加入 ${paths.length} 个文件，正在顺序上传。` });
     let succeeded = 0;
     const failures: string[] = [];
     for (const path of paths) {
       try {
         await invoke<DriveNode>("upload_drive_file", {
-          request: { filePath: path, parentId: currentFolderId },
+          request: { filePath: path, parentId: folderId },
         });
         succeeded += 1;
       } catch (error) {
-        failures.push(`${fileName(path)}：${String(error)}`);
+        failures.push(`${localName(path)}：${String(error)}`);
       }
-      await refreshLocalData();
+      await refreshLocal();
     }
     setBusy(null);
-    setActiveProgress(null);
-    if (failures.length) {
-      setNotice({
-        type: "error",
-        text: `上传完成：成功 ${succeeded}，失败 ${failures.length}。${failures[0]}`,
-      });
-    } else {
-      setNotice({ type: "success", text: `${succeeded} 个文件已上传到 Notion Drive。` });
-    }
+    setProgress(null);
+    setNotice(
+      failures.length
+        ? { type: "error", text: `成功 ${succeeded}，失败 ${failures.length}。${failures[0]}` }
+        : { type: "success", text: `${succeeded} 个文件已上传。` },
+    );
   }
 
   async function downloadSelected() {
-    if (!selectedNode || selectedNode.nodeType !== "file") return;
-    const destination = await save({
-      title: "保存云盘文件",
-      defaultPath: config.downloadDirectory
-        ? `${config.downloadDirectory.replace(/[\\/]$/, "")}/${selectedNode.name}`
-        : selectedNode.name,
-    });
+    if (!selected || selected.nodeType !== "file") return;
+    const defaultPath = config.downloadDirectory
+      ? `${config.downloadDirectory.replace(/[\\/]$/, "")}/${selected.name}`
+      : selected.name;
+    const destination = await save({ title: "保存云盘文件", defaultPath });
     if (!destination) return;
 
     setBusy("download");
     try {
       await invoke<DriveTransfer>("download_drive_file", {
-        request: { nodeId: selectedNode.id, destinationPath: destination },
+        request: { nodeId: selected.id, destinationPath: destination },
       });
       const separator = Math.max(destination.lastIndexOf("/"), destination.lastIndexOf("\\"));
       if (separator > 0) {
@@ -342,28 +316,28 @@ export default function App() {
         setConfig(nextConfig);
         await invoke("save_config", { config: nextConfig });
       }
-      await refreshLocalData();
-      setNotice({ type: "success", text: `下载完成：${destination}` });
+      await refreshLocal();
+      setNotice({ type: "success", text: `下载并校验完成：${destination}` });
     } catch (error) {
-      await refreshLocalData();
+      await refreshLocal();
       setNotice({ type: "error", text: String(error) });
     } finally {
       setBusy(null);
-      setActiveProgress(null);
+      setProgress(null);
     }
   }
 
   async function renameSelected() {
-    if (!selectedNode) return;
-    const name = window.prompt("请输入新名称", selectedNode.name);
-    if (!name?.trim() || name.trim() === selectedNode.name) return;
+    if (!selected) return;
+    const name = window.prompt("请输入新名称", selected.name);
+    if (!name?.trim() || name.trim() === selected.name) return;
     setBusy("rename");
     try {
       await invoke<DriveNode>("rename_drive_node", {
-        nodeId: selectedNode.id,
+        nodeId: selected.id,
         newName: name.trim(),
       });
-      await refreshLocalData();
+      await refreshLocal();
       setNotice({ type: "success", text: "重命名完成。" });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
@@ -373,31 +347,32 @@ export default function App() {
   }
 
   async function moveSelected() {
-    if (!selectedNode) return;
-    const folderList = activeFolders
-      .filter((folder) => folder.id !== selectedNode.id)
+    if (!selected) return;
+    const choices = folders
+      .filter((folder) => folder.id !== selected.id)
       .map((folder) => folder.logicalPath)
       .sort()
       .join("\n");
     const targetPath = window.prompt(
-      `请输入目标文件夹路径，输入 / 表示根目录：\n\n${folderList}`,
-      currentFolder?.logicalPath || "/",
+      `输入目标文件夹路径，/ 表示根目录：\n\n${choices}`,
+      currentFolder?.logicalPath ?? "/",
     );
     if (targetPath === null) return;
     const normalized = targetPath.trim() || "/";
-    const target = normalized === "/" ? null : activeFolders.find((folder) => folder.logicalPath === normalized);
+    const target = normalized === "/" ? null : folders.find((folder) => folder.logicalPath === normalized);
     if (normalized !== "/" && !target) {
       setNotice({ type: "error", text: `找不到目标文件夹：${normalized}` });
       return;
     }
+
     setBusy("move");
     try {
       await invoke<DriveNode>("move_drive_node", {
-        nodeId: selectedNode.id,
-        newParentId: target?.id || null,
+        nodeId: selected.id,
+        newParentId: target?.id ?? null,
       });
-      await refreshLocalData();
-      setSelectedNodeId(null);
+      await refreshLocal();
+      setSelectedId(null);
       setNotice({ type: "success", text: "移动完成。" });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
@@ -406,23 +381,20 @@ export default function App() {
     }
   }
 
-  async function setSelectedTrashed(trashed: boolean) {
-    if (!selectedNode) return;
-    const confirmed = trashed
-      ? window.confirm(`将“${selectedNode.name}”移入回收站？文件夹中的所有内容也会一起隐藏。`)
-      : true;
-    if (!confirmed) return;
+  async function setTrashed(trashed: boolean) {
+    if (!selected) return;
+    if (trashed && !window.confirm(`将“${selected.name}”移入回收站？`)) return;
     setBusy("trash");
     try {
       const count = await invoke<number>("set_drive_node_trashed", {
-        nodeId: selectedNode.id,
+        nodeId: selected.id,
         trashed,
       });
-      await refreshLocalData();
-      setSelectedNodeId(null);
+      await refreshLocal();
+      setSelectedId(null);
       setNotice({
         type: "success",
-        text: trashed ? `已将 ${count} 个节点移入回收站。` : `已恢复 ${count} 个节点。`,
+        text: trashed ? `已移入回收站：${count} 个节点。` : `已恢复：${count} 个节点。`,
       });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
@@ -434,41 +406,41 @@ export default function App() {
   async function clearTransfers() {
     try {
       const count = await invoke<number>("clear_finished_drive_transfers");
-      await refreshLocalData();
-      setNotice({ type: "success", text: `已清理 ${count} 条已结束的传输记录。` });
+      await refreshLocal();
+      setNotice({ type: "success", text: `已清理 ${count} 条传输记录。` });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
     }
   }
 
-  async function disconnectDrive() {
-    if (!window.confirm("仅断开本机索引，不会删除 Notion 中的文件。确定继续？")) return;
+  async function disconnect() {
+    if (!window.confirm("只清除本机索引，不会删除 Notion 文件。确定断开？")) return;
     await invoke("disconnect_drive");
-    await refreshLocalData();
-    setCurrentFolderId(null);
-    setSelectedNodeId(null);
-    setNotice({ type: "info", text: "已断开本机云盘索引，可在设置中重新连接。" });
+    setFolderId(null);
+    setSelectedId(null);
+    await refreshLocal();
+    setNotice({ type: "info", text: "本机索引已断开，可重新连接远端 Data Source。" });
   }
 
   async function chooseLegacyFile() {
-    const selected = await open({ directory: false, multiple: false, title: "选择单个文件" });
-    if (typeof selected === "string") setLegacyFilePath(selected);
+    const chosen = await open({ directory: false, multiple: false, title: "选择单个文件" });
+    if (typeof chosen === "string") setLegacyFile(chosen);
   }
 
   async function uploadLegacyFile() {
-    if (!legacyFilePath) return;
+    if (!legacyFile) return;
     setBusy("legacy-upload");
     try {
       const record = await invoke<UploadRecord>("upload_single_file", {
         request: {
-          filePath: legacyFilePath,
+          filePath: legacyFile,
           rootPageId: config.rootPageId,
           displayMode: "file",
         },
       });
       setNotice({
         type: record.status === "success" ? "success" : "error",
-        text: record.message || record.status,
+        text: record.message ?? record.status,
       });
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
@@ -478,18 +450,18 @@ export default function App() {
   }
 
   async function chooseLegacyFolder() {
-    const selected = await open({ directory: true, multiple: false, title: "选择同步文件夹" });
-    if (typeof selected !== "string") return;
-    const next = { ...config, folderPath: selected };
-    setConfig(next);
-    await invoke("save_config", { config: next });
+    const chosen = await open({ directory: true, multiple: false, title: "选择同步文件夹" });
+    if (typeof chosen !== "string") return;
+    const nextConfig = { ...config, folderPath: chosen };
+    setConfig(nextConfig);
+    await invoke("save_config", { config: nextConfig });
     setBusy("legacy-scan");
     try {
-      const result = await invoke<ScanResult>("scan_folder", {
-        folderPath: selected,
-        skipHidden: next.skipHidden,
+      const scan = await invoke<ScanResult>("scan_folder", {
+        folderPath: chosen,
+        skipHidden: nextConfig.skipHidden,
       });
-      setLegacyScan(result);
+      setLegacyScan(scan);
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
     } finally {
@@ -521,6 +493,10 @@ export default function App() {
     }
   }
 
+  const progressPercent = progress?.totalBytes
+    ? Math.min(100, Math.round((progress.transferredBytes / progress.totalBytes) * 100))
+    : 0;
+
   return (
     <div className="drive-shell">
       <aside className="drive-sidebar">
@@ -528,211 +504,47 @@ export default function App() {
           <div className="brand-icon"><Cloud size={22} /></div>
           <div><strong>Notion File</strong><span>个人云盘 · v0.5.0</span></div>
         </div>
-
         <nav>
-          <button className={view === "drive" ? "active" : ""} onClick={() => setView("drive")}>
-            <HardDrive size={17} />我的云盘
-          </button>
-          <button className={view === "transfers" ? "active" : ""} onClick={() => setView("transfers")}>
-            <ListChecks size={17} />传输中心
-          </button>
-          <button className={view === "legacy" ? "active" : ""} onClick={() => setView("legacy")}>
-            <FolderSync size={17} />传统同步
-          </button>
-          <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
-            <Settings size={17} />连接设置
-          </button>
+          <button className={view === "drive" ? "active" : ""} onClick={() => setView("drive")}><HardDrive size={17} />我的云盘</button>
+          <button className={view === "transfers" ? "active" : ""} onClick={() => setView("transfers")}><ListChecks size={17} />传输中心</button>
+          <button className={view === "legacy" ? "active" : ""} onClick={() => setView("legacy")}><FolderSync size={17} />传统同步</button>
+          <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings size={17} />连接设置</button>
         </nav>
-
         <div className={`connection-card ${driveReady && hasToken ? "ready" : ""}`}>
           {driveReady && hasToken ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-          <div>
-            <strong>{driveReady ? "云盘已连接" : "云盘未初始化"}</strong>
-            <span>{hasToken ? "Token 已安全保存" : "需要保存 Notion Token"}</span>
-          </div>
+          <div><strong>{driveReady ? "云盘已连接" : "云盘未初始化"}</strong><span>{hasToken ? "Token 已安全保存" : "需要保存 Notion Token"}</span></div>
         </div>
       </aside>
 
       <main className="drive-main">
         <header className="drive-topbar">
-          <div>
-            <strong>{view === "drive" ? (showTrash ? "回收站" : "我的云盘") : view === "transfers" ? "传输中心" : view === "legacy" ? "传统上传与同步" : "连接设置"}</strong>
-            <span>{driveReady ? `Data Source ${config.driveDataSourceId.slice(0, 8)}…` : "使用 Notion Database 保存远端文件索引"}</span>
-          </div>
+          <div><strong>{view === "drive" ? (showTrash ? "回收站" : "我的云盘") : view === "transfers" ? "传输中心" : view === "legacy" ? "传统上传与同步" : "连接设置"}</strong><span>{driveReady ? `Data Source ${config.driveDataSourceId.slice(0, 8)}…` : "使用 Notion 保存远端文件与索引"}</span></div>
           {busy && <div className="busy-label"><LoaderCircle size={15} className="spin" />正在处理</div>}
         </header>
 
         <div className="drive-content">
-          {notice && (
-            <div className={`notice ${notice.type}`}>
-              {notice.type === "error" ? <AlertCircle size={18} /> : notice.type === "success" ? <CheckCircle2 size={18} /> : <Cloud size={18} />}
-              <span>{notice.text}</span>
-              <button onClick={() => setNotice(null)}><X size={15} /></button>
-            </div>
-          )}
-
-          {activeProgress && busy && (
-            <div className="transfer-banner">
-              <div>
-                {activeProgress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}
-                <span><strong>{activeProgress.fileName}</strong><small>{activeProgress.stage}</small></span>
-              </div>
-              <div className="progress-meta">{formatBytes(activeProgress.transferredBytes)} / {formatBytes(activeProgress.totalBytes)}</div>
-              <div className="progress-track"><div style={{ width: `${progressPercent(activeProgress)}%` }} /></div>
-            </div>
-          )}
+          {notice && <div className={`notice ${notice.type}`}>{notice.type === "error" ? <AlertCircle size={18} /> : notice.type === "success" ? <CheckCircle2 size={18} /> : <Cloud size={18} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={15} /></button></div>}
+          {progress && busy && <div className="transfer-banner"><div>{progress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}<span><strong>{progress.fileName}</strong><small>{progress.stage}</small></span></div><div className="progress-meta">{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</div><div className="progress-track"><div style={{ width: `${progressPercent}%` }} /></div></div>}
 
           {view === "drive" && (
             <section>
-              {!driveReady ? (
-                <div className="onboarding-card">
-                  <div className="onboarding-icon"><Cloud size={38} /></div>
-                  <h1>把 Notion 变成个人文件云盘</h1>
-                  <p>程序会在指定父页面下创建专用数据库，用于保存虚拟目录、文件元数据和附件位置。本地 SQLite 作为快速缓存，可以随时从 Notion 重建。</p>
-                  <button className="primary" onClick={() => setView("settings")}><Settings size={16} />开始配置</button>
+              {!driveReady ? <div className="onboarding-card"><div className="onboarding-icon"><Cloud size={38} /></div><h1>把 Notion 变成个人文件云盘</h1><p>文件保存在 Notion，目录与传输状态由桌面客户端管理。本地索引可以随时从远端重建。</p><button className="primary" onClick={() => setView("settings")}><Settings size={16} />开始配置</button></div> : <>
+                <div className="stats-grid"><div><FileText size={18} /><strong>{stats.files}</strong><span>文件</span></div><div><Folder size={18} /><strong>{stats.folders}</strong><span>文件夹</span></div><div><Database size={18} /><strong>{formatBytes(stats.bytes)}</strong><span>已索引容量</span></div><div><Archive size={18} /><strong>{stats.trashed}</strong><span>回收站节点</span></div></div>
+                <div className="drive-toolbar"><div className="toolbar-actions">{!showTrash && <button className="primary" onClick={uploadFiles} disabled={Boolean(busy)}><Upload size={16} />上传文件</button>}{!showTrash && <button onClick={createFolder} disabled={Boolean(busy)}><Plus size={16} />新建文件夹</button>}<button onClick={refreshRemote} disabled={Boolean(busy)}><RefreshCw size={16} />重建索引</button><button className={showTrash ? "active" : ""} onClick={() => { setShowTrash((value) => !value); setSelectedId(null); }}><Trash2 size={16} />{showTrash ? "返回云盘" : "回收站"}</button></div><label className="search-box"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或路径" /></label></div>
+                {!showTrash && <div className="breadcrumbs"><button onClick={() => setFolderId(null)}><Home size={15} />根目录</button>{breadcrumbs.map((folder) => <span key={folder.id}><ChevronRight size={14} /><button onClick={() => setFolderId(folder.id)}>{folder.name}</button></span>)}</div>}
+                <div className="drive-workspace">
+                  <div className="file-panel"><div className="file-table header-row"><span>名称</span><span>大小</span><span>修改时间</span><span>状态</span></div><div className="file-table-body">{visibleNodes.length === 0 ? <div className="empty-state"><FolderOpen size={36} /><strong>{query ? "没有匹配的文件" : showTrash ? "回收站为空" : "这个文件夹为空"}</strong></div> : visibleNodes.map((node) => <button key={node.id} className={`file-table row ${selectedId === node.id ? "selected" : ""}`} onClick={() => setSelectedId(node.id)} onDoubleClick={() => node.nodeType === "folder" && node.status === "active" && setFolderId(node.id)}><span className="file-name"><i>{nodeIcon(node)}</i><span><strong>{node.name}</strong><small>{node.logicalPath}</small></span></span><span>{node.nodeType === "folder" ? "—" : formatBytes(node.size)}</span><span>{formatDate(node.modifiedAt)}</span><span><em className={`node-status ${node.status}`}>{node.status === "active" ? "正常" : "已删除"}</em></span></button>)}</div></div>
+                  <aside className="inspector">{selected ? <><div className="inspector-title"><i>{nodeIcon(selected)}</i><div><strong>{selected.name}</strong><span>{selected.logicalPath}</span></div></div><dl><div><dt>类型</dt><dd>{selected.nodeType === "folder" ? "文件夹" : selected.mimeType ?? "文件"}</dd></div><div><dt>大小</dt><dd>{formatBytes(selected.size)}</dd></div><div><dt>版本</dt><dd>v{selected.version}</dd></div><div><dt>修改时间</dt><dd>{formatDate(selected.modifiedAt)}</dd></div>{selected.sha256 && <div><dt>SHA-256</dt><dd className="hash">{selected.sha256}</dd></div>}</dl><div className="inspector-actions">{selected.status === "active" && selected.nodeType === "file" && <button className="primary" onClick={downloadSelected} disabled={Boolean(busy)}><Download size={15} />下载</button>}{selected.status === "active" && <button onClick={renameSelected} disabled={Boolean(busy)}><Pencil size={15} />重命名</button>}{selected.status === "active" && <button onClick={moveSelected} disabled={Boolean(busy)}><Move size={15} />移动</button>}{selected.notionPageUrl && <button onClick={() => window.open(selected.notionPageUrl, "_blank")}><ExternalLink size={15} />Notion 页面</button>}{selected.status === "active" ? <button className="danger" onClick={() => setTrashed(true)} disabled={Boolean(busy)}><Trash2 size={15} />移入回收站</button> : <button onClick={() => setTrashed(false)} disabled={Boolean(busy)}><RotateCcw size={15} />恢复</button>}</div></> : <div className="empty-inspector"><HardDrive size={30} /><strong>选择一个节点</strong><span>查看文件信息并执行下载、移动或重命名。</span></div>}</aside>
                 </div>
-              ) : (
-                <>
-                  <div className="stats-grid">
-                    <div><FileText size={18} /><strong>{stats.files}</strong><span>文件</span></div>
-                    <div><Folder size={18} /><strong>{stats.folders}</strong><span>文件夹</span></div>
-                    <div><Database size={18} /><strong>{formatBytes(stats.bytes)}</strong><span>已索引容量</span></div>
-                    <div><Archive size={18} /><strong>{stats.trashed}</strong><span>回收站节点</span></div>
-                  </div>
-
-                  <div className="drive-toolbar">
-                    <div className="toolbar-actions">
-                      {!showTrash && <button className="primary" onClick={chooseAndUploadFiles} disabled={Boolean(busy)}><Upload size={16} />上传文件</button>}
-                      {!showTrash && <button onClick={createFolder} disabled={Boolean(busy)}><Plus size={16} />新建文件夹</button>}
-                      <button onClick={refreshRemoteIndex} disabled={Boolean(busy)}><RefreshCw size={16} />重建索引</button>
-                      <button className={showTrash ? "active" : ""} onClick={() => { setShowTrash((value) => !value); setSelectedNodeId(null); }}><Trash2 size={16} />{showTrash ? "返回云盘" : "回收站"}</button>
-                    </div>
-                    <label className="search-box"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称或路径" /></label>
-                  </div>
-
-                  {!showTrash && (
-                    <div className="breadcrumbs">
-                      <button onClick={() => setCurrentFolderId(null)}><Home size={15} />根目录</button>
-                      {breadcrumbs.map((folder) => (
-                        <span key={folder.id}><ChevronRight size={14} /><button onClick={() => setCurrentFolderId(folder.id)}>{folder.name}</button></span>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="drive-workspace">
-                    <div className="file-panel">
-                      <div className="file-table header-row"><span>名称</span><span>大小</span><span>修改时间</span><span>状态</span></div>
-                      <div className="file-table-body">
-                        {visibleNodes.length === 0 ? (
-                          <div className="empty-state"><FolderOpen size={36} /><strong>{query ? "没有匹配的文件" : showTrash ? "回收站为空" : "这个文件夹为空"}</strong><span>{!showTrash && !query ? "上传文件或新建文件夹开始使用" : ""}</span></div>
-                        ) : visibleNodes.map((node) => (
-                          <button
-                            key={node.id}
-                            className={`file-table row ${selectedNodeId === node.id ? "selected" : ""}`}
-                            onClick={() => setSelectedNodeId(node.id)}
-                            onDoubleClick={() => node.nodeType === "folder" && node.status === "active" && setCurrentFolderId(node.id)}
-                          >
-                            <span className="file-name"><i>{nodeIcon(node)}</i><span><strong>{node.name}</strong><small>{node.logicalPath}</small></span></span>
-                            <span>{node.nodeType === "folder" ? "—" : formatBytes(node.size)}</span>
-                            <span>{formatDate(node.modifiedAt)}</span>
-                            <span><em className={`node-status ${node.status}`}>{node.status === "active" ? "正常" : "已删除"}</em></span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <aside className="inspector">
-                      {selectedNode ? (
-                        <>
-                          <div className="inspector-title"><i>{nodeIcon(selectedNode)}</i><div><strong>{selectedNode.name}</strong><span>{selectedNode.logicalPath}</span></div></div>
-                          <dl>
-                            <div><dt>类型</dt><dd>{selectedNode.nodeType === "folder" ? "文件夹" : selectedNode.mimeType || "文件"}</dd></div>
-                            <div><dt>大小</dt><dd>{formatBytes(selectedNode.size)}</dd></div>
-                            <div><dt>版本</dt><dd>v{selectedNode.version}</dd></div>
-                            <div><dt>修改时间</dt><dd>{formatDate(selectedNode.modifiedAt)}</dd></div>
-                            {selectedNode.sha256 && <div><dt>SHA-256</dt><dd className="hash">{selectedNode.sha256}</dd></div>}
-                          </dl>
-                          <div className="inspector-actions">
-                            {selectedNode.status === "active" && selectedNode.nodeType === "file" && <button className="primary" onClick={downloadSelected} disabled={Boolean(busy)}><Download size={15} />下载</button>}
-                            {selectedNode.status === "active" && <button onClick={renameSelected} disabled={Boolean(busy)}><Pencil size={15} />重命名</button>}
-                            {selectedNode.status === "active" && <button onClick={moveSelected} disabled={Boolean(busy)}><Move size={15} />移动</button>}
-                            {selectedNode.notionPageUrl && <button onClick={() => window.open(selectedNode.notionPageUrl, "_blank")}><ExternalLink size={15} />Notion 页面</button>}
-                            {selectedNode.status === "active" ? (
-                              <button className="danger" onClick={() => setSelectedTrashed(true)} disabled={Boolean(busy)}><Trash2 size={15} />移入回收站</button>
-                            ) : (
-                              <button onClick={() => setSelectedTrashed(false)} disabled={Boolean(busy)}><RotateCcw size={15} />恢复</button>
-                            )}
-                          </div>
-                        </>
-                      ) : (
-                        <div className="empty-inspector"><HardDrive size={30} /><strong>选择一个节点</strong><span>查看文件信息并执行下载、移动或重命名。</span></div>
-                      )}
-                    </aside>
-                  </div>
-                </>
-              )}
+              </>}
             </section>
           )}
 
-          {view === "transfers" && (
-            <section>
-              <div className="section-heading"><div><h1>传输中心</h1><p>上传与下载记录保存在 SQLite 中，应用异常退出后的未完成任务会标记为失败。</p></div><button onClick={clearTransfers}><Trash2 size={15} />清理已结束记录</button></div>
-              <div className="transfer-list">
-                {transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => {
-                  const percent = transfer.totalBytes ? Math.round((transfer.transferredBytes / transfer.totalBytes) * 100) : 0;
-                  return <div className="transfer-item" key={transfer.id}>
-                    <i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i>
-                    <div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message || transfer.localPath || ""}</span><div className="mini-progress"><div style={{ width: `${Math.min(100, percent)}%` }} /></div></div>
-                    <div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div>
-                    <em className={`transfer-status ${transfer.status}`}>{statusLabel(transfer.status)}</em>
-                  </div>;
-                })}
-              </div>
-            </section>
-          )}
+          {view === "transfers" && <section><div className="section-heading"><div><h1>传输中心</h1><p>上传和下载记录持久化在 SQLite 中。</p></div><button onClick={clearTransfers}><Trash2 size={15} />清理已结束记录</button></div><div className="transfer-list">{transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => { const percent = transfer.totalBytes ? Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)) : 0; return <div className="transfer-item" key={transfer.id}><i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i><div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message ?? transfer.localPath ?? ""}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div><div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div><em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em></div>; })}</div></section>}
 
-          {view === "settings" && (
-            <section className="settings-page">
-              <div className="section-heading"><div><h1>连接设置</h1><p>内部 Integration 必须被添加到父页面的 Connections 中，才有权限创建云盘数据库。</p></div></div>
-              <div className="settings-card">
-                <label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label>
-                <label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="https://www.notion.so/..." /></label>
-                <details>
-                  <summary>连接已有云盘数据库</summary>
-                  <label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} placeholder="新建云盘时留空" /></label>
-                  <label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} placeholder="跨设备连接已有云盘时填写" /></label>
-                </details>
-                <div className="settings-actions">
-                  <button onClick={persistSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button>
-                  <button className="primary" onClick={initializeDrive} disabled={!credentialsReady || !config.rootPageId.trim() || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>
-                  {driveReady && <button className="danger" onClick={disconnectDrive}>断开本机索引</button>}
-                </div>
-              </div>
-              <div className="info-card"><AlertCircle size={18} /><div><strong>数据安全说明</strong><p>断开本机索引不会删除 Notion 中的数据。文件下载前会重新获取短期有效的签名地址，完成后使用 SHA-256 校验。</p></div></div>
-            </section>
-          )}
+          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>请先将 Integration 添加到父页面的 Connections。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="https://www.notion.so/..." /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!credentialsReady || !config.rootPageId.trim() || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div><div className="info-card"><AlertCircle size={18} /><div><strong>数据安全说明</strong><p>文件下载前会重新获取签名地址，并在下载后使用 SHA-256 校验；断开本机索引不会删除 Notion 数据。</p></div></div></section>}
 
-          {view === "legacy" && (
-            <section>
-              <div className="section-heading"><div><h1>传统上传与文件夹同步</h1><p>保留 v0.4.0 的原有能力。新文件管理建议优先使用“我的云盘”。</p></div></div>
-              <div className="legacy-grid">
-                <div className="legacy-card">
-                  <h2><Upload size={18} />单文件上传</h2>
-                  <p>创建独立 Notion 页面并附加文件，支持大文件分片与超大视频切分。</p>
-                  <div className="path-display">{legacyFilePath || "尚未选择文件"}</div>
-                  <div className="card-actions"><button onClick={chooseLegacyFile}>选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFilePath || Boolean(busy)}>上传</button></div>
-                </div>
-                <div className="legacy-card">
-                  <h2><FolderSync size={18} />文件夹转文档</h2>
-                  <p>扫描本地文件夹并重建为一篇 Notion 文档，适合一次性备份和资料归档。</p>
-                  <div className="path-display">{config.folderPath || "尚未选择文件夹"}</div>
-                  {legacyScan && <small>已扫描 {legacyScan.files.length} 个文件，共 {formatBytes(legacyScan.totalBytes)}</small>}
-                  {legacyResult && <small>最近结果：创建 {legacyResult.created}，更新 {legacyResult.updated}，失败 {legacyResult.failed}</small>}
-                  <div className="card-actions"><button onClick={chooseLegacyFolder}>选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!config.folderPath || Boolean(busy)}>开始同步</button></div>
-                </div>
-              </div>
-            </section>
-          )}
+          {view === "legacy" && <section><div className="section-heading"><div><h1>传统上传与文件夹同步</h1><p>保留 v0.4.0 的原有上传和文件夹转文档能力。</p></div></div><div className="legacy-grid"><div className="legacy-card"><h2><Upload size={18} />单文件上传</h2><p>创建独立 Notion 页面并附加文件。</p><div className="path-display">{legacyFile || "尚未选择文件"}</div><div className="card-actions"><button onClick={chooseLegacyFile}>选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFile || Boolean(busy)}>上传</button></div></div><div className="legacy-card"><h2><FolderSync size={18} />文件夹转文档</h2><p>扫描本地文件夹并重建为一篇 Notion 文档。</p><div className="path-display">{config.folderPath || "尚未选择文件夹"}</div>{legacyScan && <small>已扫描 {legacyScan.files.length} 个文件，共 {formatBytes(legacyScan.totalBytes)}</small>}{legacyResult && <small>最近结果：创建 {legacyResult.created}，更新 {legacyResult.updated}，失败 {legacyResult.failed}</small>}<div className="card-actions"><button onClick={chooseLegacyFolder}>选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!config.folderPath || Boolean(busy)}>开始同步</button></div></div></div></section>}
         </div>
       </main>
     </div>
