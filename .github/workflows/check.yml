@@ -33,3 +33,17 @@ jobs:
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check
+
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies and generate icons
+        run: npm install
+      - name: Cargo check on Windows
+        working-directory: src-tauri
+        run: cargo check
