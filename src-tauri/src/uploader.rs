@@ -28,6 +28,7 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 const MAX_INLINE_TEXT_SIZE: u64 = 1024 * 1024;
 const MAX_SINGLE_PART_SIZE: u64 = 20 * 1024 * 1024;
 const MULTI_PART_SIZE: u64 = 10 * 1024 * 1024;
+const VIDEO_SPLIT_THRESHOLD_SIZE: u64 = 5_000_000_000;
 const MAX_NOTION_FILE_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -71,6 +72,7 @@ pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<Upl
     let size = metadata.len();
     let display_mode = normalize_display_mode(&request.display_mode).to_string();
     let is_video = is_video_file(&file_path, &mime_type);
+    let should_split_video = is_video && size > VIDEO_SPLIT_THRESHOLD_SIZE;
 
     emit_progress(app, 0, 1, "正在计算文件校验值", &file_name);
     let sha256 = hash_file(&file_path).await?;
@@ -141,7 +143,7 @@ pub async fn upload(app: &AppHandle, request: SingleUploadRequest) -> Result<Upl
             message: Some(error.to_string()),
             display_mode,
             segment_count: 0,
-            used_ffmpeg: false,
+            used_ffmpeg: should_split_video,
         },
     };
 
@@ -166,16 +168,9 @@ async fn prepare_and_upload(
         anyhow::bail!("只有视频文件可以使用“视频块”保存模式");
     }
 
-    if size <= MAX_NOTION_FILE_SIZE {
-        let asset = UploadAsset {
-            path: file_path.to_path_buf(),
-            file_name: file_name.to_string(),
-            mime_type: mime_type.to_string(),
-            size,
-        };
-        let page = upload_assets_to_notion(
+    if is_video && size > VIDEO_SPLIT_THRESHOLD_SIZE {
+        return split_and_upload_video(
             app,
-            &[asset],
             file_path,
             file_name,
             mime_type,
@@ -184,20 +179,53 @@ async fn prepare_and_upload(
             root_page_id,
             display_mode,
         )
-        .await?;
-        return Ok(UploadOutcome {
-            page,
-            segment_count: 1,
-            used_ffmpeg: false,
-        });
+        .await;
     }
 
-    if !is_video {
+    if size > MAX_NOTION_FILE_SIZE {
         anyhow::bail!("文件超过 Notion 的 5 GiB 单文件上限；当前仅视频可通过 ffmpeg 自动切分");
     }
 
+    let asset = UploadAsset {
+        path: file_path.to_path_buf(),
+        file_name: file_name.to_string(),
+        mime_type: mime_type.to_string(),
+        size,
+    };
+    let page = upload_assets_to_notion(
+        app,
+        &[asset],
+        file_path,
+        file_name,
+        mime_type,
+        size,
+        sha256,
+        root_page_id,
+        display_mode,
+    )
+    .await?;
+
+    Ok(UploadOutcome {
+        page,
+        segment_count: 1,
+        used_ffmpeg: false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn split_and_upload_video(
+    app: &AppHandle,
+    file_path: &Path,
+    file_name: &str,
+    mime_type: &str,
+    size: u64,
+    sha256: &str,
+    root_page_id: &str,
+    display_mode: &str,
+) -> Result<UploadOutcome> {
     let split = ffmpeg::split_video(app, file_path, size).await?;
     let mut assets = Vec::with_capacity(split.parts.len());
+
     for part in &split.parts {
         let part_metadata = tokio::fs::metadata(part)
             .await
@@ -264,6 +292,11 @@ async fn upload_assets_to_notion(
         .await
         .map_err(|error| create_page_error(root_page_id, error))?;
 
+    let upload_client = Client::builder()
+        .user_agent("notion-file/0.3.0")
+        .build()
+        .context("无法初始化文件上传客户端")?;
+
     let write_result = async {
         let mut blocks = vec![metadata_callout(
             &original_path.to_string_lossy(),
@@ -284,7 +317,15 @@ async fn upload_assets_to_notion(
                 "正在上传文件到 Notion",
                 &format!("{}（{}/{}）", asset.file_name, index + 1, assets.len()),
             );
-            let upload_id = upload_file(app, &token, asset, index + 1, assets.len()).await?;
+            let upload_id = upload_asset(
+                app,
+                &upload_client,
+                &token,
+                asset,
+                index + 1,
+                assets.len(),
+            )
+            .await?;
 
             if assets.len() > 1 {
                 blocks.push(heading_block(&format!(
@@ -304,22 +345,7 @@ async fn upload_assets_to_notion(
         }
 
         if assets.len() == 1 {
-            let asset = &assets[0];
-            let extension = asset
-                .path
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if TEXT_EXTENSIONS.contains(&extension.as_str())
-                && asset.size <= MAX_INLINE_TEXT_SIZE
-            {
-                if let Ok(content) = tokio::fs::read_to_string(&asset.path).await {
-                    blocks.push(divider_block());
-                    blocks.push(heading_block("内容预览"));
-                    blocks.extend(text_blocks(&content, &extension));
-                }
-            }
+            append_text_preview(&mut blocks, &assets[0]).await;
         }
 
         notion.append_blocks(&page.id, blocks).await
@@ -334,22 +360,35 @@ async fn upload_assets_to_notion(
     Ok(page)
 }
 
-async fn upload_file(
+async fn append_text_preview(blocks: &mut Vec<Value>, asset: &UploadAsset) {
+    let extension = asset
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !TEXT_EXTENSIONS.contains(&extension.as_str()) || asset.size > MAX_INLINE_TEXT_SIZE {
+        return;
+    }
+    if let Ok(content) = tokio::fs::read_to_string(&asset.path).await {
+        blocks.push(divider_block());
+        blocks.push(heading_block("内容预览"));
+        blocks.extend(text_blocks(&content, &extension));
+    }
+}
+
+async fn upload_asset(
     app: &AppHandle,
+    client: &Client,
     token: &str,
     asset: &UploadAsset,
     asset_number: usize,
     asset_total: usize,
 ) -> Result<String> {
-    let client = Client::builder()
-        .user_agent("notion-file/0.3.0")
-        .build()
-        .context("无法初始化文件上传客户端")?;
-
     if asset.size <= MAX_SINGLE_PART_SIZE {
-        upload_single_part(&client, token, asset).await
+        upload_single_part(client, token, asset).await
     } else {
-        upload_multi_part(app, &client, token, asset, asset_number, asset_total).await
+        upload_multi_part(app, client, token, asset, asset_number, asset_total).await
     }
 }
 
@@ -625,8 +664,8 @@ fn emit_progress(app: &AppHandle, current: usize, total: usize, stage: &str, det
 #[cfg(test)]
 mod tests {
     use super::{
-        is_video_file, normalize_display_mode, parent_page_id, part_count, MAX_SINGLE_PART_SIZE,
-        MULTI_PART_SIZE,
+        is_video_file, normalize_display_mode, parent_page_id, part_count,
+        VIDEO_SPLIT_THRESHOLD_SIZE, MAX_SINGLE_PART_SIZE, MULTI_PART_SIZE,
     };
     use std::path::Path;
 
@@ -641,6 +680,11 @@ mod tests {
         assert_eq!(part_count(MAX_SINGLE_PART_SIZE + 1), 3);
         assert_eq!(part_count(MULTI_PART_SIZE * 3), 3);
         assert_eq!(part_count(MULTI_PART_SIZE * 3 + 1), 4);
+    }
+
+    #[test]
+    fn uses_decimal_five_gb_video_threshold() {
+        assert_eq!(VIDEO_SPLIT_THRESHOLD_SIZE, 5_000_000_000);
     }
 
     #[test]
