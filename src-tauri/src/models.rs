@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_upload_display_mode() -> String {
+    "file".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -35,6 +39,18 @@ pub struct SyncRequest {
 pub struct SingleUploadRequest {
     pub file_path: String,
     pub root_page_id: String,
+    #[serde(default = "default_upload_display_mode")]
+    pub display_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegStatus {
+    pub available: bool,
+    pub ffmpeg_path: Option<String>,
+    pub ffprobe_path: Option<String>,
+    pub version: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +137,12 @@ pub struct UploadRecord {
     pub page_id: Option<String>,
     pub page_url: Option<String>,
     pub message: Option<String>,
+    #[serde(default = "default_upload_display_mode")]
+    pub display_mode: String,
+    #[serde(default)]
+    pub segment_count: usize,
+    #[serde(default)]
+    pub used_ffmpeg: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,4 +152,13 @@ pub struct SyncProgress {
     pub total: usize,
     pub relative_path: String,
     pub stage: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadProgress {
+    pub current: usize,
+    pub total: usize,
+    pub stage: String,
+    pub detail: String,
 }
