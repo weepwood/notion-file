@@ -312,6 +312,7 @@ fn disconnect_drive(app: AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if let Err(error) = drive::recover_queue(app.handle().clone()) {
                 eprintln!("恢复持久化上传队列失败：{error}");
