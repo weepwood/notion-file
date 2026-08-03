@@ -136,6 +136,7 @@ Notion File 将真实文件存放在 Notion 中，并通过本地桌面客户端
 - 上传任务尚未支持进程级暂停与恢复。
 - 回收站为应用级软删除，不会立即物理清除 Notion 底层附件。
 - 免费工作区的文件大小限制由 Notion 服务端决定。
+- macOS Apple Silicon DMG 当前未配置 Apple Developer 签名与公证，首次打开时可能需要在系统安全设置中手动允许。
 
 ## 开发
 
@@ -158,10 +159,16 @@ cargo check
 cargo test --lib
 ```
 
-构建 Windows NSIS：
+构建 Windows x64 NSIS：
 
 ```bash
 npm run desktop:build
+```
+
+构建 macOS Apple Silicon DMG：
+
+```bash
+npm run desktop:build:mac-arm64
 ```
 
 ## 发布
@@ -172,4 +179,9 @@ npm run desktop:build
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-Release 工作流仅发布 Windows x64 NSIS 安装包。
+Release 工作流会构建并仅保留两个安装文件：
+
+```text
+Notion.File_<version>_x64-setup.exe
+Notion.File_<version>_aarch64.dmg
+```
