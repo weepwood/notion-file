@@ -1,9 +1,10 @@
 use crate::notion_request::{parse_json_response, NotionHttp};
 use anyhow::{Context, Result};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 
@@ -11,6 +12,7 @@ const NOTION_BASE_URL: &str = "https://api.notion.com/v1";
 pub(crate) const MAX_SINGLE_PART_SIZE: u64 = 20 * 1024 * 1024;
 pub(crate) const MULTI_PART_SIZE: u64 = 10 * 1024 * 1024;
 pub(crate) const MAX_NOTION_FILE_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+const MULTI_PART_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FileUploadProgress {
@@ -182,8 +184,20 @@ async fn upload_multi_part_with_progress(
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("无法打开待分片上传文件“{file_name}”"))?;
+    let progress_by_part = Arc::new(Mutex::new(vec![0_u64; number_of_parts as usize]));
+    let mut uploads = FuturesUnordered::new();
     let mut remaining = size;
     let started = Instant::now();
+
+    callback(FileUploadProgress {
+        endpoint_url: endpoint_url.clone(),
+        endpoint_host: endpoint_host.clone(),
+        bytes_sent: 0,
+        total_bytes: size,
+        current_part: 1,
+        total_parts: number_of_parts,
+        elapsed_ms: 0,
+    });
 
     for part_number in 1..=number_of_parts {
         let current_size = remaining.min(MULTI_PART_SIZE) as usize;
@@ -191,40 +205,90 @@ async fn upload_multi_part_with_progress(
         file.read_exact(&mut bytes)
             .await
             .with_context(|| format!("读取第 {part_number}/{number_of_parts} 个 API 分片失败"))?;
-        let base = (part_number - 1) * MULTI_PART_SIZE;
-        callback(FileUploadProgress {
-            endpoint_url: endpoint_url.clone(),
-            endpoint_host: endpoint_host.clone(),
-            bytes_sent: base.min(size),
-            total_bytes: size,
-            current_part: part_number,
-            total_parts: number_of_parts,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
+        remaining -= current_size as u64;
+
+        let upload_http = http.clone();
+        let part_upload_url = raw_upload_url.clone();
+        let part_file_name = file_name.to_string();
+        let part_mime_type = mime_type.to_string();
         let progress_callback = callback.clone();
         let progress_url = endpoint_url.clone();
         let progress_host = endpoint_host.clone();
-        http.send_multipart_with_progress(
-            raw_upload_url.clone(),
-            file_name,
-            mime_type,
-            bytes,
-            Some(part_number),
-            move |part_sent| {
-                progress_callback(FileUploadProgress {
-                    endpoint_url: progress_url.clone(),
-                    endpoint_host: progress_host.clone(),
-                    bytes_sent: base.saturating_add(part_sent).min(size),
-                    total_bytes: size,
-                    current_part: part_number,
-                    total_parts: number_of_parts,
-                    elapsed_ms: started.elapsed().as_millis() as u64,
-                });
-            },
-        )
-        .await
-        .with_context(|| format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败"))?;
-        remaining -= current_size as u64;
+        let progress_state = progress_by_part.clone();
+
+        uploads.push(async move {
+            emit_multi_part_progress(
+                &progress_state,
+                &progress_callback,
+                &progress_url,
+                &progress_host,
+                part_number,
+                0,
+                number_of_parts,
+                size,
+                started,
+            );
+
+            let callback_for_body = progress_callback.clone();
+            let url_for_body = progress_url.clone();
+            let host_for_body = progress_host.clone();
+            let state_for_body = progress_state.clone();
+            let response = upload_http
+                .send_multipart_with_progress(
+                    part_upload_url,
+                    &part_file_name,
+                    &part_mime_type,
+                    bytes,
+                    Some(part_number),
+                    move |part_sent| {
+                        emit_multi_part_progress(
+                            &state_for_body,
+                            &callback_for_body,
+                            &url_for_body,
+                            &host_for_body,
+                            part_number,
+                            part_sent,
+                            number_of_parts,
+                            size,
+                            started,
+                        );
+                    },
+                )
+                .await
+                .with_context(|| {
+                    format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
+                })?;
+
+            parse_json_response(response, "Notion 文件分片上传请求")
+                .await
+                .with_context(|| {
+                    format!("第 {part_number}/{number_of_parts} 个 API 分片被 Notion 拒绝")
+                })?;
+
+            emit_multi_part_progress(
+                &progress_state,
+                &progress_callback,
+                &progress_url,
+                &progress_host,
+                part_number,
+                current_size as u64,
+                number_of_parts,
+                size,
+                started,
+            );
+            Ok::<u64, anyhow::Error>(part_number)
+        });
+
+        if uploads.len() >= MULTI_PART_CONCURRENCY {
+            uploads
+                .next()
+                .await
+                .context("并发分片上传任务意外结束")??;
+        }
+    }
+
+    while let Some(result) = uploads.next().await {
+        result?;
     }
 
     let completed = parse_json_response(
@@ -247,6 +311,45 @@ async fn upload_multi_part_with_progress(
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
     Ok(upload_id)
+}
+
+fn emit_multi_part_progress(
+    progress_by_part: &Mutex<Vec<u64>>,
+    callback: &Arc<dyn Fn(FileUploadProgress) + Send + Sync>,
+    endpoint_url: &str,
+    endpoint_host: &Option<String>,
+    part_number: u64,
+    part_sent: u64,
+    number_of_parts: u64,
+    total_size: u64,
+    started: Instant,
+) {
+    let bytes_sent =
+        aggregate_part_progress(progress_by_part, part_number, part_sent, total_size);
+    callback(FileUploadProgress {
+        endpoint_url: endpoint_url.to_string(),
+        endpoint_host: endpoint_host.clone(),
+        bytes_sent,
+        total_bytes: total_size,
+        current_part: part_number,
+        total_parts: number_of_parts,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    });
+}
+
+fn aggregate_part_progress(
+    progress_by_part: &Mutex<Vec<u64>>,
+    part_number: u64,
+    part_sent: u64,
+    total_size: u64,
+) -> u64 {
+    let mut progress = progress_by_part
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = progress.get_mut(part_number.saturating_sub(1) as usize) {
+        *value = (*value).max(part_sent);
+    }
+    progress.iter().copied().sum::<u64>().min(total_size)
 }
 
 fn display_upload_url(raw: &str) -> String {
@@ -331,7 +434,9 @@ where
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("无法打开待分片上传文件“{file_name}”"))?;
+    let mut uploads = FuturesUnordered::new();
     let mut remaining = size;
+    let mut completed_parts = 0_u64;
 
     for part_number in 1..=number_of_parts {
         let current_size = remaining.min(MULTI_PART_SIZE) as usize;
@@ -339,28 +444,47 @@ where
         file.read_exact(&mut bytes)
             .await
             .with_context(|| format!("读取第 {part_number}/{number_of_parts} 个 API 分片失败"))?;
-
-        parse_json_response(
-            http.send_multipart(
-                upload_url.clone(),
-                file_name,
-                mime_type,
-                bytes,
-                Some(part_number),
-            )
-            .await
-            .with_context(|| {
-                format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
-            })?,
-            "Notion 文件分片上传请求",
-        )
-        .await
-        .with_context(|| {
-            format!("第 {part_number}/{number_of_parts} 个 API 分片被 Notion 拒绝")
-        })?;
-
         remaining -= current_size as u64;
-        on_part_uploaded(part_number, number_of_parts);
+
+        let upload_http = http.clone();
+        let part_upload_url = upload_url.clone();
+        let part_file_name = file_name.to_string();
+        let part_mime_type = mime_type.to_string();
+        uploads.push(async move {
+            let response = upload_http
+                .send_multipart(
+                    part_upload_url,
+                    &part_file_name,
+                    &part_mime_type,
+                    bytes,
+                    Some(part_number),
+                )
+                .await
+                .with_context(|| {
+                    format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
+                })?;
+            parse_json_response(response, "Notion 文件分片上传请求")
+                .await
+                .with_context(|| {
+                    format!("第 {part_number}/{number_of_parts} 个 API 分片被 Notion 拒绝")
+                })?;
+            Ok::<u64, anyhow::Error>(part_number)
+        });
+
+        if uploads.len() >= MULTI_PART_CONCURRENCY {
+            uploads
+                .next()
+                .await
+                .context("并发分片上传任务意外结束")??;
+            completed_parts += 1;
+            on_part_uploaded(completed_parts, number_of_parts);
+        }
+    }
+
+    while let Some(result) = uploads.next().await {
+        result?;
+        completed_parts += 1;
+        on_part_uploaded(completed_parts, number_of_parts);
     }
 
     let completed = parse_json_response(
@@ -418,7 +542,11 @@ pub(crate) fn part_count(size: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{part_count, MAX_NOTION_FILE_SIZE, MAX_SINGLE_PART_SIZE, MULTI_PART_SIZE};
+    use super::{
+        aggregate_part_progress, part_count, MAX_NOTION_FILE_SIZE, MAX_SINGLE_PART_SIZE,
+        MULTI_PART_CONCURRENCY, MULTI_PART_SIZE,
+    };
+    use std::sync::Mutex;
 
     #[test]
     fn calculates_multi_part_count() {
@@ -430,5 +558,20 @@ mod tests {
     #[test]
     fn keeps_notion_object_limit_at_five_gib() {
         assert_eq!(MAX_NOTION_FILE_SIZE, 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn limits_parallel_part_uploads_to_two() {
+        assert_eq!(MULTI_PART_CONCURRENCY, 2);
+    }
+
+    #[test]
+    fn aggregates_parallel_progress_without_going_backwards() {
+        let progress = Mutex::new(vec![0, 0, 0]);
+        assert_eq!(aggregate_part_progress(&progress, 1, 5, 30), 5);
+        assert_eq!(aggregate_part_progress(&progress, 2, 7, 30), 12);
+        assert_eq!(aggregate_part_progress(&progress, 1, 3, 30), 12);
+        assert_eq!(aggregate_part_progress(&progress, 1, 10, 30), 17);
+        assert_eq!(aggregate_part_progress(&progress, 3, 20, 30), 30);
     }
 }
