@@ -1,7 +1,7 @@
 [package]
 name = "notion-file"
-version = "0.2.1"
-description = "Sync a local folder to Notion pages"
+version = "0.3.0"
+description = "Upload local files and sync folders to Notion"
 authors = ["weepwood"]
 edition = "2021"
 
