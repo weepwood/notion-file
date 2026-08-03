@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "icons": "tauri icon public/app-icon.svg",
     "desktop:dev": "tauri dev",
-    "desktop:build": "npm run icons && tauri build --bundles nsis,msi",
+    "desktop:build": "npm run icons && tauri build --bundles nsis",
     "postinstall": "tauri icon public/app-icon.svg"
   },
   "dependencies": {

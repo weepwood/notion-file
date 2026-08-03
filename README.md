@@ -122,7 +122,7 @@ npm install
 npm run tauri dev
 ```
 
-构建 Windows 安装包：
+构建 Windows NSIS 安装包：
 
 ```bash
 npm run desktop:build
@@ -130,4 +130,4 @@ npm run desktop:build
 
 ## 发布
 
-同时更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 中的版本号并合并到 `main` 后，GitHub Actions 会自动构建 Windows NSIS、MSI 和可执行文件，并创建对应的 GitHub Release。
+同时更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 中的版本号并合并到 `main` 后，GitHub Actions 只会构建并保留 Windows NSIS 安装包 `Notion File_<version>_x64-setup.exe`，不会发布 MSI 或便携版可执行文件。

@@ -57,7 +57,7 @@ jobs:
         if: steps.release.outputs.exists != 'true'
         run: npm install
 
-      - name: Build Windows installers
+      - name: Build Windows NSIS installer
         if: steps.release.outputs.exists != 'true'
         run: npm run desktop:build
 
@@ -75,16 +75,26 @@ jobs:
             git push origin $env:TAG
           }
 
-          $assets = @()
-          $assets += Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $portable = "src-tauri/target/release/notion-file.exe"
-          if (Test-Path $portable) {
-            $assets += (Resolve-Path $portable).Path
-          }
-
+          $assets = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
           if ($assets.Count -eq 0) {
-            throw "No release assets were generated."
+            throw "No NSIS installer was generated."
           }
 
           gh release create $env:TAG --title "Notion File $env:TAG" --generate-notes @assets
+
+      - name: Keep only NSIS installer asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view $env:TAG --json assets | ConvertFrom-Json
+          $installers = @($release.assets | Where-Object { $_.name -like "*_x64-setup.exe" })
+          if ($installers.Count -eq 0) {
+            throw "Release does not contain an NSIS setup installer."
+          }
+
+          foreach ($asset in $release.assets) {
+            if ($asset.name -notlike "*_x64-setup.exe") {
+              gh release delete-asset $env:TAG $asset.name --yes
+            }
+          }
