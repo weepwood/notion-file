@@ -3,8 +3,11 @@ mod notion;
 mod scanner;
 mod storage;
 mod syncer;
+mod uploader;
 
-use models::{AppConfig, ScanResult, SyncRequest, SyncResult};
+use models::{
+    AppConfig, ScanResult, SingleUploadRequest, SyncRequest, SyncResult, UploadRecord,
+};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -25,6 +28,26 @@ fn save_notion_token(token: String) -> Result<(), String> {
 #[tauri::command]
 fn has_saved_token() -> bool {
     storage::has_token()
+}
+
+#[tauri::command]
+fn get_upload_history(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
+    storage::load_upload_history(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_upload_history(app: AppHandle) -> Result<(), String> {
+    storage::clear_upload_history(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn upload_single_file(
+    app: AppHandle,
+    request: SingleUploadRequest,
+) -> Result<UploadRecord, String> {
+    uploader::upload(&app, request)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -76,6 +99,9 @@ pub fn run() {
             save_config,
             save_notion_token,
             has_saved_token,
+            get_upload_history,
+            clear_upload_history,
+            upload_single_file,
             test_notion_connection,
             scan_folder,
             sync_folder,
