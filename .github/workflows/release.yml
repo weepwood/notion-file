@@ -249,6 +249,7 @@ jobs:
           if git diff --cached --quiet; then
             exit 0
           fi
-          git commit -m "chore: 记录 v0.6.0 发布状态 [skip ci]"
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          git commit -m "chore: 记录 v${VERSION} 发布状态 [skip ci]"
           git pull --rebase origin main
           git push origin HEAD:main
