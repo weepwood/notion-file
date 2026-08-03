@@ -1,7 +1,7 @@
 {
-  "conclusion": "success",
-  "runId": "30790213234",
-  "headSha": "633a36e74439b6cfd78f53bf54ae0de45f026db1",
-  "runUrl": "https://github.com/weepwood/notion-file/actions/runs/30790213234",
-  "recordedAt": "2026-08-03T06:27:17Z"
+  "conclusion": "failure",
+  "runId": "30809235530",
+  "headSha": "ed8b8a601c0ae0c342982a9efdddaa6797fc6cd0",
+  "runUrl": "https://github.com/weepwood/notion-file/actions/runs/30809235530",
+  "recordedAt": "2026-08-03T11:29:57Z"
 }
