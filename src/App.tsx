@@ -417,7 +417,7 @@ export default function App() {
               <div className="page-icon">📄</div>
               <h1>本地文件上传</h1>
               <p className="page-description">
-                支持单文件、Notion API 分片和超大视频自动切分。超过 5 GiB 的视频会由本地
+                支持单文件、Notion API 分片和超大视频自动切分。超过十进制 5 GB 的视频会由本地
                 ffmpeg 切成约 4.8 GB 的可播放分段，再逐段写入同一篇 Notion 页面。
               </p>
 
