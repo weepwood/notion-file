@@ -1,6 +1,8 @@
+mod database;
 mod ffmpeg;
 mod models;
 mod notion;
+mod notion_request;
 mod scanner;
 mod storage;
 mod syncer;
@@ -46,13 +48,19 @@ async fn detect_ffmpeg() -> FfmpegStatus {
 }
 
 #[tauri::command]
-fn get_upload_history(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
-    storage::load_upload_history(&app).map_err(|error| error.to_string())
+async fn get_upload_history(app: AppHandle) -> Result<Vec<UploadRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || storage::load_upload_history(&app))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn clear_upload_history(app: AppHandle) -> Result<(), String> {
-    storage::clear_upload_history(&app).map_err(|error| error.to_string())
+async fn clear_upload_history(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || storage::clear_upload_history(&app))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
