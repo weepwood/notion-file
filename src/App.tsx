@@ -838,9 +838,17 @@ export default function App() {
                   <p>上传任务写入 SQLite 后由 Rust 后台顺序执行，应用重启会自动恢复未完成任务。</p>
                 </div>
                 <div className="queue-toolbar">
-                  <button onClick={() => setQueuePaused(!uploadQueue.paused)}>
-                    {uploadQueue.paused ? <Play size={15} /> : <Pause size={15} />}
-                    {uploadQueue.paused ? "继续队列" : "暂停队列"}
+                  <button
+                    onClick={() => setQueuePaused(uploadQueue.workerRunning && !uploadQueue.paused)}
+                  >
+                    {uploadQueue.paused || (!uploadQueue.workerRunning && uploadQueue.pendingCount > 0)
+                      ? <Play size={15} />
+                      : <Pause size={15} />}
+                    {uploadQueue.paused
+                      ? "继续队列"
+                      : !uploadQueue.workerRunning && uploadQueue.pendingCount > 0
+                        ? "启动队列"
+                        : "暂停队列"}
                   </button>
                   <button onClick={clearFinishedQueue}><Trash2 size={15} />清理已完成队列</button>
                   <button onClick={clearTransfers}><Trash2 size={15} />清理传输记录</button>
@@ -873,7 +881,7 @@ export default function App() {
             </section>
           )}
 
-          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div></section>}
+          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect} disabled={uploadQueue.workerRunning}>断开本机索引</button>}</div></div></section>}
 
           {view === "legacy" && <section><div className="section-heading"><div><h1>传统上传与文件夹转文档</h1><p>保留 v0.4.0 的单文件页面和本地文件夹转 Notion 文档能力。</p></div></div><div className="legacy-grid"><div className="legacy-card"><h2>单文件上传</h2><p>{legacyFile || "选择文件后创建同名 Notion 页面。"}</p><div><button onClick={chooseLegacyFile}><FileText size={15} />选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFile || Boolean(busy)}><Upload size={15} />上传</button></div></div><div className="legacy-card"><h2>文件夹转文档</h2><p>{config.folderPath || "选择本地文件夹，扫描并整理为一篇 Notion 文档。"}</p><div><button onClick={chooseLegacyFolder}><FolderOpen size={15} />选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!legacyScan || Boolean(busy)}><FolderSync size={15} />开始同步</button></div>{legacyScan && <small>扫描 {legacyScan.files.length} 个文件，变化 {legacyScan.changedCount} 个，共 {formatBytes(legacyScan.totalBytes)}</small>}{legacyResult?.pageUrl && <button onClick={() => window.open(legacyResult.pageUrl, "_blank")}><ExternalLink size={14} />打开同步文档</button>}</div></div></section>}
         </div>

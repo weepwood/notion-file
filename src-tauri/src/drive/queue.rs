@@ -6,14 +6,17 @@ use crate::storage;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 
 const DATABASE_FILE_NAME: &str = "notion-file.sqlite3";
 const MAX_QUEUE_HISTORY: i64 = 1000;
 const PROGRESS_PERSIST_INTERVAL: u64 = 1024 * 1024;
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
+static PROGRESS_CACHE: OnceLock<Mutex<HashMap<String, (String, u64)>>> = OnceLock::new();
 
 pub(super) fn recover_and_start(app: AppHandle) -> Result<()> {
     let connection = open(&app)?;
@@ -29,10 +32,15 @@ pub(super) fn recover_and_start(app: AppHandle) -> Result<()> {
         [now],
     )?;
     drop(connection);
-    if !queue_paused(&app)? {
-        spawn_worker(app);
-    }
+    start_if_ready(&app);
     Ok(())
+}
+
+pub(super) fn start_if_ready(app: &AppHandle) {
+    if queue_paused(app).unwrap_or(true) || drive_context(app).is_err() {
+        return;
+    }
+    spawn_worker(app.clone());
 }
 
 pub(super) fn snapshot(app: &AppHandle) -> Result<DriveQueueSnapshot> {
@@ -135,7 +143,7 @@ pub(super) fn pause(app: &AppHandle) -> Result<DriveQueueSnapshot> {
 
 pub(super) fn resume(app: &AppHandle) -> Result<DriveQueueSnapshot> {
     set_paused(app, false)?;
-    spawn_worker(app.clone());
+    start_if_ready(app);
     let result = snapshot(app)?;
     emit_snapshot(app, &result);
     Ok(result)
@@ -221,6 +229,23 @@ pub(super) fn persist_progress(
     transferred_bytes: u64,
     total_bytes: u64,
 ) {
+    let should_persist = {
+        let cache = PROGRESS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = cache
+            .entry(node_id.to_string())
+            .or_insert_with(|| (String::new(), 0));
+        let should = entry.0 != stage
+            || transferred_bytes >= total_bytes
+            || transferred_bytes.saturating_sub(entry.1) >= PROGRESS_PERSIST_INTERVAL;
+        if should {
+            *entry = (stage.to_string(), transferred_bytes);
+        }
+        should
+    };
+    if !should_persist {
+        return;
+    }
     let Ok(connection) = open(app) else {
         return;
     };

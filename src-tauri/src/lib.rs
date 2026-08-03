@@ -30,8 +30,10 @@ fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_notion_token(token: String) -> Result<(), String> {
-    storage::save_token(&token).map_err(|error| error.to_string())
+fn save_notion_token(app: AppHandle, token: String) -> Result<(), String> {
+    storage::save_token(&token).map_err(|error| error.to_string())?;
+    drive::start_queue_if_ready(&app);
+    Ok(())
 }
 
 #[tauri::command]

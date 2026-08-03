@@ -63,6 +63,7 @@ pub async fn initialize(app: &AppHandle, root_page_id: String) -> Result<DriveIn
         let _ = version_store::ensure_current_version(app, node);
     }
 
+    queue::start_if_ready(app);
     Ok(DriveInitResult {
         database_id,
         data_source_id,
@@ -157,6 +158,10 @@ pub async fn upload_file(app: &AppHandle, request: DriveUploadRequest) -> Result
 pub fn recover_queue(app: AppHandle) -> Result<()> {
     storage::mark_interrupted_transfers(&app, &Utc::now().to_rfc3339())?;
     queue::recover_and_start(app)
+}
+
+pub fn start_queue_if_ready(app: &AppHandle) {
+    queue::start_if_ready(app);
 }
 
 pub fn queue_snapshot(app: &AppHandle) -> Result<DriveQueueSnapshot> {
