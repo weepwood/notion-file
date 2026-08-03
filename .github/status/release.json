@@ -1,7 +1,17 @@
 {
   "conclusion": "success",
-  "runId": "30819019624",
-  "headSha": "e76da841ab80aefc4f944d1c90d6a0430bf8b0aa",
-  "runUrl": "https://github.com/weepwood/notion-file/actions/runs/30819019624",
-  "recordedAt": "2026-08-03T13:48:29Z"
+  "version": "0.7.0",
+  "runId": "30820071266",
+  "headSha": "52bc712686f9709abf7a9111e0835fac8d046f1f",
+  "runUrl": "https://github.com/weepwood/notion-file/actions/runs/30820071266",
+  "recordedAt": "2026-08-03T14:01:48Z",
+  "jobs": {
+    "windows": "success",
+    "macosAppleSilicon": "success",
+    "publish": "success"
+  },
+  "assets": [
+    "Notion.File_0.7.0_x64-setup.exe",
+    "Notion.File_0.7.0_aarch64.dmg"
+  ]
 }
