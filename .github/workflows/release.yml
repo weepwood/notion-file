@@ -95,6 +95,16 @@ jobs:
 
           foreach ($asset in $release.assets) {
             if ($asset.name -notlike "*_x64-setup.exe") {
+              Write-Host "Deleting extra release asset: $($asset.name)"
               gh release delete-asset $env:TAG $asset.name --yes
             }
           }
+
+          $remaining = gh release view $env:TAG --json assets | ConvertFrom-Json
+          $remainingAssets = @($remaining.assets)
+          if ($remainingAssets.Count -ne 1 -or $remainingAssets[0].name -notlike "*_x64-setup.exe") {
+            $names = ($remainingAssets | ForEach-Object { $_.name }) -join ", "
+            throw "Release asset validation failed. Remaining assets: $names"
+          }
+
+          Write-Host "Remaining release asset: $($remainingAssets[0].name)"
