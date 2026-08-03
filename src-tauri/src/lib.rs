@@ -1,3 +1,4 @@
+mod ffmpeg;
 mod models;
 mod notion;
 mod scanner;
@@ -6,7 +7,8 @@ mod syncer;
 mod uploader;
 
 use models::{
-    AppConfig, ScanResult, SingleUploadRequest, SyncRequest, SyncResult, UploadRecord,
+    AppConfig, FfmpegStatus, ScanResult, SingleUploadRequest, SyncRequest, SyncResult,
+    UploadRecord,
 };
 use tauri::AppHandle;
 
@@ -28,6 +30,19 @@ fn save_notion_token(token: String) -> Result<(), String> {
 #[tauri::command]
 fn has_saved_token() -> bool {
     storage::has_token()
+}
+
+#[tauri::command]
+async fn detect_ffmpeg() -> FfmpegStatus {
+    tauri::async_runtime::spawn_blocking(ffmpeg::detect_ffmpeg)
+        .await
+        .unwrap_or_else(|error| FfmpegStatus {
+            available: false,
+            ffmpeg_path: None,
+            ffprobe_path: None,
+            version: None,
+            message: format!("检测 ffmpeg 失败：{error}"),
+        })
 }
 
 #[tauri::command]
@@ -75,12 +90,10 @@ async fn scan_folder(
     skip_hidden: bool,
 ) -> Result<ScanResult, String> {
     let state = storage::load_state(&app).map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        scanner::scan(&folder_path, skip_hidden, &state)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || scanner::scan(&folder_path, skip_hidden, &state))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -99,6 +112,7 @@ pub fn run() {
             save_config,
             save_notion_token,
             has_saved_token,
+            detect_ffmpeg,
             get_upload_history,
             clear_upload_history,
             upload_single_file,
