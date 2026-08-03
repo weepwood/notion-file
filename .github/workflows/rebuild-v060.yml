@@ -1,0 +1,48 @@
+name: Rebuild v0.6.0 branch
+
+on:
+  push:
+    branches:
+      - rebuild/notion-drive-v0.6.0
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rebuild/notion-drive-v0.6.0
+          fetch-depth: 0
+
+      - name: Rebuild feature branch on latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main feat/notion-drive-v0.6.0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B clean-v060 origin/main
+          git checkout origin/feat/notion-drive-v0.6.0 -- \
+            README.md \
+            package.json \
+            src-tauri/Cargo.toml \
+            src-tauri/src/drive/advanced.rs \
+            src-tauri/src/drive/mod.rs \
+            src-tauri/src/drive/transfer.rs \
+            src-tauri/src/drive/version_store.rs \
+            src-tauri/src/lib.rs \
+            src-tauri/src/models.rs \
+            src-tauri/src/notion_request.rs \
+            src-tauri/tauri.conf.json \
+            src/App.tsx \
+            src/advanced.css \
+            src/main.tsx \
+            src/types.ts
+
+          git add --all
+          git commit -m "feat: 云盘支持续传、批量下载与版本历史"
+          git push origin HEAD:feat/notion-drive-v0.6.0 --force
