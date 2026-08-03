@@ -1,11 +1,13 @@
 mod advanced;
 mod notion_index;
+mod queue;
 mod transfer;
 mod version_store;
 
 use crate::models::{
     AppConfig, DriveDownloadRequest, DriveFolderDownloadRequest, DriveFolderDownloadResult,
-    DriveInitResult, DriveNode, DriveTransfer, DriveUploadRequest, DriveVersion,
+    DriveInitResult, DriveNode, DriveQueueEnqueueRequest, DriveQueueSnapshot, DriveTransfer,
+    DriveUploadRequest, DriveVersion,
     DriveVersionDownloadRequest, DriveVersionUploadRequest,
 };
 use crate::notion::normalize_page_id;
@@ -152,6 +154,41 @@ pub async fn create_folder(
 
 pub async fn upload_file(app: &AppHandle, request: DriveUploadRequest) -> Result<DriveNode> {
     transfer::upload_file(app, request).await
+}
+
+pub fn recover_queue(app: AppHandle) -> Result<()> {
+    queue::recover_and_start(app)
+}
+
+pub fn queue_snapshot(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::snapshot(app)
+}
+
+pub fn enqueue_uploads(
+    app: &AppHandle,
+    request: DriveQueueEnqueueRequest,
+) -> Result<DriveQueueSnapshot> {
+    queue::enqueue(app, request)
+}
+
+pub fn pause_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::pause(app)
+}
+
+pub fn resume_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::resume(app)
+}
+
+pub fn retry_queue_job(app: &AppHandle, job_id: String) -> Result<DriveQueueSnapshot> {
+    queue::retry(app, job_id)
+}
+
+pub fn cancel_queue_job(app: &AppHandle, job_id: String) -> Result<DriveQueueSnapshot> {
+    queue::cancel(app, job_id)
+}
+
+pub fn clear_finished_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::clear_finished(app)
 }
 
 pub async fn download_file(

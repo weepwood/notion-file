@@ -55,6 +55,33 @@ export interface DriveTransfer {
   updatedAt: string;
 }
 
+export interface DriveQueueJob {
+  id: string;
+  nodeId: string;
+  parentId?: string;
+  filePath: string;
+  fileName: string;
+  size: number;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  stage: string;
+  transferredBytes: number;
+  attempts: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface DriveQueueSnapshot {
+  paused: boolean;
+  workerRunning: boolean;
+  runningJobId?: string;
+  pendingCount: number;
+  failedCount: number;
+  jobs: DriveQueueJob[];
+}
+
 export interface DriveTransferProgress {
   transferId: string;
   nodeId?: string;
