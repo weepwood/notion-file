@@ -32,6 +32,13 @@ pub struct SyncRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SingleUploadRequest {
+    pub file_path: String,
+    pub root_page_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScannedFile {
     pub relative_path: String,
     pub absolute_path: String,
@@ -98,6 +105,22 @@ pub struct SyncResult {
     pub archived: usize,
     pub failed: usize,
     pub items: Vec<SyncItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRecord {
+    pub id: String,
+    pub file_path: String,
+    pub file_name: String,
+    pub size: u64,
+    pub mime_type: String,
+    pub sha256: String,
+    pub uploaded_at: String,
+    pub status: String,
+    pub page_id: Option<String>,
+    pub page_url: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
