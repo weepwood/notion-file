@@ -11,6 +11,7 @@
     "icons": "tauri icon public/app-icon.svg",
     "desktop:dev": "tauri dev",
     "desktop:build": "npm run icons && tauri build --bundles nsis",
+    "desktop:build:mac-arm64": "npm run icons && tauri build --target aarch64-apple-darwin --bundles dmg",
     "postinstall": "tauri icon public/app-icon.svg"
   },
   "dependencies": {
