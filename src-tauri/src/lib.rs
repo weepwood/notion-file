@@ -1,5 +1,6 @@
 mod database;
 mod ffmpeg;
+mod file_upload;
 mod models;
 mod notion;
 mod notion_request;
