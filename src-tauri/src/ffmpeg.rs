@@ -11,15 +11,19 @@ pub const MAX_VIDEO_SEGMENT_BYTES: u64 = 4_800_000_000;
 const TARGET_VIDEO_SEGMENT_BYTES: u64 = 4_600_000_000;
 const MAX_SPLIT_ATTEMPTS: usize = 5;
 
-pub struct SplitVideo {
-    pub parts: Vec<PathBuf>,
-    temp_dir: PathBuf,
+struct TempDirectory {
+    path: PathBuf,
 }
 
-impl Drop for SplitVideo {
+impl Drop for TempDirectory {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.temp_dir);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+pub struct SplitVideo {
+    pub parts: Vec<PathBuf>,
+    _temp_directory: TempDirectory,
 }
 
 pub fn detect_ffmpeg() -> FfmpegStatus {
@@ -77,8 +81,11 @@ pub async fn split_video(
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .context("无法创建视频切分临时目录")?;
+    let temp_directory = TempDirectory {
+        path: temp_dir.clone(),
+    };
 
-    let output_pattern = temp_dir.join("segment-%03d.mkv");
+    let output_pattern = temp_dir.join(format!("{}.part-%03d.mkv", safe_stem(input)));
     let mut segment_seconds = estimate_segment_seconds(duration, input_size);
 
     for attempt in 1..=MAX_SPLIT_ATTEMPTS {
@@ -123,7 +130,6 @@ pub async fn split_video(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             anyhow::bail!(
                 "ffmpeg 视频切分失败{}",
                 if stderr.is_empty() {
@@ -136,7 +142,6 @@ pub async fn split_video(
 
         let parts = list_parts(&temp_dir).await?;
         if parts.len() < 2 {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             anyhow::bail!("ffmpeg 未生成预期的视频分段");
         }
 
@@ -153,14 +158,16 @@ pub async fn split_video(
                 "视频切分完成",
                 &format!("已生成 {} 个可播放分段", parts.len()),
             );
-            return Ok(SplitVideo { parts, temp_dir });
+            return Ok(SplitVideo {
+                parts,
+                _temp_directory: temp_directory,
+            });
         }
 
         let adjustment = (MAX_VIDEO_SEGMENT_BYTES as f64 / largest as f64) * 0.92;
         segment_seconds = (segment_seconds * adjustment).max(1.0);
     }
 
-    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     anyhow::bail!("视频切分后仍有分段超过 4.8 GB；源视频关键帧间隔可能过长")
 }
 
@@ -202,6 +209,29 @@ fn estimate_segment_seconds(duration: f64, input_size: u64) -> f64 {
     (duration * TARGET_VIDEO_SEGMENT_BYTES as f64 / input_size as f64)
         .max(1.0)
         .min(duration)
+}
+
+fn safe_stem(path: &Path) -> String {
+    let source = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("video");
+    let value: String = source
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect();
+    if value.is_empty() {
+        "video".to_string()
+    } else {
+        value
+    }
 }
 
 async fn list_parts(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -335,12 +365,18 @@ fn emit_progress(app: &AppHandle, current: usize, total: usize, stage: &str, det
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_segment_seconds, MAX_VIDEO_SEGMENT_BYTES};
+    use super::{estimate_segment_seconds, safe_stem, MAX_VIDEO_SEGMENT_BYTES};
+    use std::path::Path;
 
     #[test]
     fn estimates_smaller_than_five_gib_segments() {
         let seconds = estimate_segment_seconds(10_000.0, 10 * 1024 * 1024 * 1024);
         assert!(seconds > 4_000.0);
         assert!(MAX_VIDEO_SEGMENT_BYTES < 5 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn sanitizes_segment_file_names() {
+        assert_eq!(safe_stem(Path::new("a:b?.mp4")), "a_b_");
     }
 }
