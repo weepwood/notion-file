@@ -661,15 +661,17 @@ export default function App() {
           {progress && busy && <div className="transfer-banner diagnostic-banner">
             <div className="diagnostic-title"><div>{progress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}<span><strong>{progress.fileName}</strong><small>{progress.stage}</small></span></div><div className="progress-meta">{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</div></div>
             <div className="progress-track"><div style={{ width: `${progressPercent}%` }} /></div>
-            <div className="diagnostic-metrics">
-              <div><span>{progress.stageCode === "hashing" ? "本地处理速度" : "当前上传速度（估算）"}</span><strong>{formatRate(progress.currentSpeedBytesPerSecond)}</strong></div>
-              <div><span>{progress.stageCode === "hashing" ? "平均处理速度" : "平均有效速度（估算）"}</span><strong>{formatRate(progress.averageSpeedBytesPerSecond)}</strong></div>
-              <div><span>当前阶段耗时</span><strong>{formatDuration(progress.stageElapsedMs)}</strong></div>
-              <div><span>总耗时</span><strong>{formatDuration(progress.elapsedMs)}</strong></div>
-              {progress.currentPart && progress.totalParts && <div><span>API 分片</span><strong>{progress.currentPart} / {progress.totalParts}</strong></div>}
-            </div>
-            {progress.endpointUrl && <div className="endpoint-row"><span>上传网址</span><code title={progress.endpointUrl}>{progress.endpointUrl}</code></div>}
-            {progress.diagnosticHint && <div className="diagnostic-hint"><AlertCircle size={15} /><span>{progress.diagnosticHint}</span></div>}
+            {progress.direction === "upload" && <>
+              <div className="diagnostic-metrics">
+                <div><span>{progress.stageCode === "hashing" ? "本地处理速度" : "当前上传速度（估算）"}</span><strong>{formatRate(progress.currentSpeedBytesPerSecond)}</strong></div>
+                <div><span>{progress.stageCode === "hashing" ? "平均处理速度" : "平均有效速度（估算）"}</span><strong>{formatRate(progress.averageSpeedBytesPerSecond)}</strong></div>
+                <div><span>当前阶段耗时</span><strong>{formatDuration(progress.stageElapsedMs)}</strong></div>
+                <div><span>总耗时</span><strong>{formatDuration(progress.elapsedMs)}</strong></div>
+                {progress.currentPart && progress.totalParts && <div><span>API 分片</span><strong>{progress.currentPart} / {progress.totalParts}</strong></div>}
+              </div>
+              {progress.endpointUrl && <div className="endpoint-row"><span>上传网址</span><code title={progress.endpointUrl}>{progress.endpointUrl}</code></div>}
+              {progress.diagnosticHint && <div className="diagnostic-hint"><AlertCircle size={15} /><span>{progress.diagnosticHint}</span></div>}
+            </>}
           </div>}
 
           {view === "drive" && (
