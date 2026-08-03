@@ -60,6 +60,20 @@ export interface SyncResult {
   items: SyncItemResult[];
 }
 
+export interface UploadRecord {
+  id: string;
+  filePath: string;
+  fileName: string;
+  size: number;
+  mimeType: string;
+  sha256: string;
+  uploadedAt: string;
+  status: "success" | "failed";
+  pageId?: string;
+  pageUrl?: string;
+  message?: string;
+}
+
 export interface SyncProgress {
   current: number;
   total: number;
