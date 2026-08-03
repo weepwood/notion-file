@@ -95,8 +95,26 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build Apple Silicon DMG
-        run: npm run desktop:build:mac-arm64
+      - name: Build Apple Silicon DMG with retry
+        shell: bash
+        run: |
+          set -uo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "DMG build attempt ${attempt}/${max_attempts}"
+            if npm run desktop:build:mac-arm64; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -eq "$max_attempts" ]]; then
+              echo "Apple Silicon DMG build failed after ${max_attempts} attempts." >&2
+              exit 1
+            fi
+
+            pkill -9 -f 'diskimages-help|diskimages-helper' || true
+            rm -rf src-tauri/target/aarch64-apple-darwin/release/bundle/dmg
+            sleep $((15 * attempt))
+          done
 
       - name: Prepare macOS release asset
         shell: bash
