@@ -36,15 +36,7 @@ pub fn append_upload_record(
 
     let transaction = connection.transaction()?;
     insert_upload_record(&transaction, record)?;
-    transaction.execute(
-        "DELETE FROM upload_history
-         WHERE id NOT IN (
-             SELECT id FROM upload_history
-             ORDER BY uploaded_at DESC, rowid DESC
-             LIMIT ?1
-         )",
-        [MAX_UPLOAD_HISTORY as i64],
-    )?;
+    trim_upload_history(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -52,7 +44,9 @@ pub fn append_upload_record(
 pub fn clear_upload_history(app: &AppHandle, legacy_path: &Path) -> Result<()> {
     let mut connection = open(app)?;
     migrate_legacy_upload_history(&mut connection, legacy_path)?;
-    connection.execute("DELETE FROM upload_history", [])?;
+    let transaction = connection.transaction()?;
+    transaction.execute("DELETE FROM upload_history", [])?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -140,6 +134,7 @@ fn migrate_legacy_upload_history(connection: &mut Connection, legacy_path: &Path
     for record in &records {
         insert_upload_record(&transaction, record)?;
     }
+    trim_upload_history(&transaction)?;
     transaction.execute(
         "INSERT INTO app_meta(key, value) VALUES(?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -147,6 +142,19 @@ fn migrate_legacy_upload_history(connection: &mut Connection, legacy_path: &Path
     )?;
     transaction.commit()?;
 
+    Ok(())
+}
+
+fn trim_upload_history(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM upload_history
+         WHERE id NOT IN (
+             SELECT id FROM upload_history
+             ORDER BY uploaded_at DESC, rowid DESC
+             LIMIT ?1
+         )",
+        [MAX_UPLOAD_HISTORY as i64],
+    )?;
     Ok(())
 }
 
@@ -221,7 +229,7 @@ fn row_to_upload_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRecor
 
 #[cfg(test)]
 mod tests {
-    use super::{initialize, insert_upload_record, row_to_upload_record};
+    use super::{initialize, insert_upload_record, row_to_upload_record, trim_upload_history};
     use crate::models::UploadRecord;
     use rusqlite::Connection;
 
@@ -265,5 +273,25 @@ mod tests {
         assert_eq!(restored.file_name, "video.mp4");
         assert_eq!(restored.segment_count, 2);
         assert!(restored.used_ffmpeg);
+    }
+
+    #[test]
+    fn trims_history_to_configured_limit() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for index in 0..505 {
+            let mut record = sample_record();
+            record.id = format!("upload-{index}");
+            record.uploaded_at = format!("2026-08-03T12:{:02}:00Z", index % 60);
+            insert_upload_record(&transaction, &record).unwrap();
+        }
+        trim_upload_history(&transaction).unwrap();
+        transaction.commit().unwrap();
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM upload_history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 500);
     }
 }
