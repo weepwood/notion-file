@@ -65,6 +65,36 @@ export interface DriveTransferProgress {
   totalBytes: number;
 }
 
+export interface DriveVersion {
+  id: string;
+  nodeId: string;
+  version: number;
+  size: number;
+  sha256: string;
+  mimeType: string;
+  fileUploadId: string;
+  notionBlockId: string;
+  originalPath?: string;
+  createdAt: string;
+}
+
+export interface DriveBatchItemResult {
+  nodeId: string;
+  logicalPath: string;
+  destinationPath: string;
+  status: "completed" | "failed";
+  message?: string;
+}
+
+export interface DriveFolderDownloadResult {
+  folderId: string;
+  destinationDirectory: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  items: DriveBatchItemResult[];
+}
+
 export interface DriveInitResult {
   databaseId: string;
   dataSourceId: string;

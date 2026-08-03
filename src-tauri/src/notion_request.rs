@@ -42,7 +42,7 @@ static GLOBAL_LIMITER: OnceLock<Arc<RateLimiter>> = OnceLock::new();
 impl NotionHttp {
     pub fn new(token: String) -> Result<Self> {
         let client = Client::builder()
-            .user_agent("notion-file/0.3.0")
+            .user_agent(format!("notion-file/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(600))
             .build()

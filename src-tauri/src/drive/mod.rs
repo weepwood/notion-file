@@ -1,9 +1,12 @@
+mod advanced;
 mod notion_index;
 mod transfer;
+mod version_store;
 
 use crate::models::{
-    AppConfig, DriveDownloadRequest, DriveInitResult, DriveNode, DriveTransfer,
-    DriveUploadRequest,
+    AppConfig, DriveDownloadRequest, DriveFolderDownloadRequest, DriveFolderDownloadResult,
+    DriveInitResult, DriveNode, DriveTransfer, DriveUploadRequest, DriveVersion,
+    DriveVersionDownloadRequest, DriveVersionUploadRequest,
 };
 use crate::notion::normalize_page_id;
 use crate::notion_request::NotionHttp;
@@ -27,23 +30,23 @@ pub async fn initialize(app: &AppHandle, root_page_id: String) -> Result<DriveIn
     if !root_page_id.trim().is_empty() {
         config.root_page_id = normalize_page_id(root_page_id.trim())?;
     }
-    if config.root_page_id.trim().is_empty() {
-        anyhow::bail!("初始化云盘前必须填写并共享一个 Notion 父页面");
-    }
 
     let token = storage::load_token()?;
     let http = NotionHttp::new(token)?;
     let mut created = false;
 
-    let (database_id, data_source_id) = if !config.drive_database_id.trim().is_empty()
-        && !config.drive_data_source_id.trim().is_empty()
-    {
+    let has_existing = !config.drive_database_id.trim().is_empty()
+        && !config.drive_data_source_id.trim().is_empty();
+    let (database_id, data_source_id) = if has_existing {
         notion_index::verify_data_source(&http, &config.drive_data_source_id).await?;
         (
             normalize_page_id(&config.drive_database_id)?,
             normalize_page_id(&config.drive_data_source_id)?,
         )
     } else {
+        if config.root_page_id.trim().is_empty() {
+            anyhow::bail!("新建云盘前必须填写并共享一个 Notion 父页面");
+        }
         created = true;
         notion_index::create_drive_database(&http, &config.root_page_id).await?
     };
@@ -54,6 +57,9 @@ pub async fn initialize(app: &AppHandle, root_page_id: String) -> Result<DriveIn
 
     let nodes = notion_index::fetch_remote_nodes(&http, &data_source_id).await?;
     storage::replace_drive_nodes(app, &nodes)?;
+    for node in &nodes {
+        let _ = version_store::ensure_current_version(app, node);
+    }
 
     Ok(DriveInitResult {
         database_id,
@@ -71,6 +77,9 @@ pub async fn refresh_index(app: &AppHandle) -> Result<Vec<DriveNode>> {
     )
     .await?;
     storage::replace_drive_nodes(app, &nodes)?;
+    for node in &nodes {
+        let _ = version_store::ensure_current_version(app, node);
+    }
     Ok(nodes)
 }
 
@@ -150,6 +159,38 @@ pub async fn download_file(
     request: DriveDownloadRequest,
 ) -> Result<DriveTransfer> {
     transfer::download_file(app, request).await
+}
+
+pub async fn download_folder(
+    app: &AppHandle,
+    request: DriveFolderDownloadRequest,
+) -> Result<DriveFolderDownloadResult> {
+    advanced::download_folder(app, request).await
+}
+
+pub fn list_versions(app: &AppHandle, node_id: String) -> Result<Vec<DriveVersion>> {
+    advanced::list_versions(app, node_id)
+}
+
+pub async fn upload_version(
+    app: &AppHandle,
+    request: DriveVersionUploadRequest,
+) -> Result<DriveNode> {
+    advanced::upload_version(app, request).await
+}
+
+pub async fn download_version(
+    app: &AppHandle,
+    request: DriveVersionDownloadRequest,
+) -> Result<DriveTransfer> {
+    advanced::download_version(app, request).await
+}
+
+pub async fn retry_transfer(
+    app: &AppHandle,
+    transfer_id: String,
+) -> Result<DriveTransfer> {
+    advanced::retry_transfer(app, transfer_id).await
 }
 
 pub async fn rename_node(app: &AppHandle, node_id: String, new_name: String) -> Result<DriveNode> {

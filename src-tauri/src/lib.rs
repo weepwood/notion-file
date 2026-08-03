@@ -11,9 +11,10 @@ mod syncer;
 mod uploader;
 
 use models::{
-    AppConfig, DriveDownloadRequest, DriveInitResult, DriveNode, DriveTransfer,
-    DriveUploadRequest, FfmpegStatus, ScanResult, SingleUploadRequest, SyncRequest, SyncResult,
-    UploadRecord,
+    AppConfig, DriveDownloadRequest, DriveFolderDownloadRequest, DriveFolderDownloadResult,
+    DriveInitResult, DriveNode, DriveTransfer, DriveUploadRequest, DriveVersion,
+    DriveVersionDownloadRequest, DriveVersionUploadRequest, FfmpegStatus, ScanResult,
+    SingleUploadRequest, SyncRequest, SyncResult, UploadRecord,
 };
 use tauri::AppHandle;
 
@@ -168,6 +169,51 @@ async fn download_drive_file(
 }
 
 #[tauri::command]
+async fn download_drive_folder(
+    app: AppHandle,
+    request: DriveFolderDownloadRequest,
+) -> Result<DriveFolderDownloadResult, String> {
+    drive::download_folder(&app, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_drive_versions(app: AppHandle, node_id: String) -> Result<Vec<DriveVersion>, String> {
+    drive::list_versions(&app, node_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn upload_drive_version(
+    app: AppHandle,
+    request: DriveVersionUploadRequest,
+) -> Result<DriveNode, String> {
+    drive::upload_version(&app, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn download_drive_version(
+    app: AppHandle,
+    request: DriveVersionDownloadRequest,
+) -> Result<DriveTransfer, String> {
+    drive::download_version(&app, request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn retry_drive_transfer(
+    app: AppHandle,
+    transfer_id: String,
+) -> Result<DriveTransfer, String> {
+    drive::retry_transfer(&app, transfer_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn rename_drive_node(
     app: AppHandle,
     node_id: String,
@@ -237,6 +283,11 @@ pub fn run() {
             create_drive_folder,
             upload_drive_file,
             download_drive_file,
+            download_drive_folder,
+            get_drive_versions,
+            upload_drive_version,
+            download_drive_version,
+            retry_drive_transfer,
             rename_drive_node,
             move_drive_node,
             set_drive_node_trashed,

@@ -50,3 +50,25 @@ jobs:
       - name: Cargo check on Windows
         working-directory: src-tauri
         run: cargo check
+
+  macos-apple-silicon:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Install dependencies
+        run: npm install
+      - name: Build Apple Silicon DMG
+        run: npm run desktop:build:mac-arm64
+      - name: Verify Apple Silicon DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit | grep -q .

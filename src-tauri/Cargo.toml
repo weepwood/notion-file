@@ -1,6 +1,6 @@
 [package]
 name = "notion-file"
-version = "0.5.0"
+version = "0.6.0"
 description = "Notion-backed personal cloud drive manager"
 authors = ["weepwood"]
 edition = "2021"
