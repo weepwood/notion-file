@@ -34,6 +34,38 @@ import type {
   UploadRecord,
 } from "./types";
 
+type AppView = "upload" | "folder" | "history" | "settings";
+
+type ViewMeta = {
+  title: string;
+  description: string;
+  icon: string;
+};
+
+const VIEW_META: Record<AppView, ViewMeta> = {
+  upload: {
+    title: "本地文件上传",
+    description:
+      "支持单文件、Notion API 分片和超大视频自动切分。超过十进制 5 GB 的视频会由本地 ffmpeg 切成约 4.8 GB 的可播放分段，再逐段写入同一篇 Notion 页面。",
+    icon: "📄",
+  },
+  folder: {
+    title: "文件夹同步",
+    description: "选择本地文件夹，将其中内容整理为一篇与文件夹同名的 Notion 文档。",
+    icon: "📁",
+  },
+  history: {
+    title: "上传记录",
+    description: "查看最近的单文件上传结果、文件信息、Notion 页面地址和失败原因。",
+    icon: "🕘",
+  },
+  settings: {
+    title: "连接设置",
+    description: "配置 Notion Token 与内部 Integration 的父页面，并测试当前连接。",
+    icon: "⚙️",
+  },
+};
+
 const DEFAULT_CONFIG: AppConfig = {
   folderPath: "",
   rootPageId: "",
@@ -84,6 +116,7 @@ function fileIcon(mimeType: string) {
 }
 
 export default function App() {
+  const [activeView, setActiveView] = useState<AppView>("upload");
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [token, setToken] = useState("");
   const [hasToken, setHasToken] = useState(false);
@@ -135,6 +168,7 @@ export default function App() {
   const canSync = Boolean(hasCredentials && canScan && !busy);
   const canUpload = Boolean(hasCredentials && selectedFilePath.trim() && !busy);
   const successfulUploads = uploadHistory.filter((record) => record.status === "success").length;
+  const viewMeta = VIEW_META[activeView];
   const progressPercent = useMemo(
     () =>
       !progress || progress.total === 0
@@ -149,6 +183,15 @@ export default function App() {
         : Math.round((uploadProgress.current / uploadProgress.total) * 100),
     [uploadProgress],
   );
+
+  function switchView(view: AppView) {
+    setActiveView(view);
+    setMessage(null);
+    requestAnimationFrame(() => {
+      const pageScroll = document.querySelector<HTMLElement>(".page-scroll");
+      pageScroll?.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
 
   async function persistToken() {
     if (!token.trim()) return;
@@ -361,20 +404,36 @@ export default function App() {
           <MoreHorizontal size={17} />
         </div>
 
-        <nav className="sidebar-nav">
-          <button className="active">
+        <nav className="sidebar-nav" aria-label="功能导航">
+          <button
+            className={activeView === "upload" ? "active" : ""}
+            aria-current={activeView === "upload" ? "page" : undefined}
+            onClick={() => switchView("upload")}
+          >
             <Upload size={17} />
             单文件上传
           </button>
-          <button>
+          <button
+            className={activeView === "folder" ? "active" : ""}
+            aria-current={activeView === "folder" ? "page" : undefined}
+            onClick={() => switchView("folder")}
+          >
             <FolderOpen size={17} />
             文件夹同步
           </button>
-          <button>
+          <button
+            className={activeView === "history" ? "active" : ""}
+            aria-current={activeView === "history" ? "page" : undefined}
+            onClick={() => switchView("history")}
+          >
             <History size={17} />
             上传记录
           </button>
-          <button>
+          <button
+            className={activeView === "settings" ? "active" : ""}
+            aria-current={activeView === "settings" ? "page" : undefined}
+            onClick={() => switchView("settings")}
+          >
             <Settings2 size={17} />
             连接设置
           </button>
@@ -382,7 +441,10 @@ export default function App() {
 
         <div className="sidebar-section">
           <span>当前文件夹</span>
-          <button className="document-link active">
+          <button
+            className={`document-link ${activeView === "folder" ? "active" : ""}`}
+            onClick={() => switchView("folder")}
+          >
             <span className="page-emoji">📁</span>
             <span>{title}</span>
           </button>
@@ -402,7 +464,7 @@ export default function App() {
           <div className="breadcrumbs">
             <span>Notion File</span>
             <ChevronRight size={14} />
-            <span>{selectedFilePath ? selectedFileName : title}</span>
+            <span>{viewMeta.title}</span>
           </div>
           <div className={`connection-dot ${hasCredentials ? "ready" : ""}`}>
             <span />
@@ -414,12 +476,9 @@ export default function App() {
           <section className="notion-page">
             <div className="page-cover" />
             <div className="page-content">
-              <div className="page-icon">📄</div>
-              <h1>本地文件上传</h1>
-              <p className="page-description">
-                支持单文件、Notion API 分片和超大视频自动切分。超过十进制 5 GB 的视频会由本地
-                ffmpeg 切成约 4.8 GB 的可播放分段，再逐段写入同一篇 Notion 页面。
-              </p>
+              <div className="page-icon">{viewMeta.icon}</div>
+              <h1>{viewMeta.title}</h1>
+              <p className="page-description">{viewMeta.description}</p>
 
               {message && (
                 <div className={`notice ${message.type}`}>
@@ -435,384 +494,432 @@ export default function App() {
                 </div>
               )}
 
-              <section className="setup-block">
-                <div className="block-heading">
-                  <div>
-                    <h2>Notion 连接</h2>
-                    <p>单文件上传和文件夹同步共用同一个 Token 与父页面设置。</p>
+              {activeView === "settings" && (
+                <section className="setup-block">
+                  <div className="block-heading">
+                    <div>
+                      <h2>Notion 连接</h2>
+                      <p>单文件上传和文件夹同步共用同一个 Token 与父页面设置。</p>
+                    </div>
+                    <span className="tag">系统凭据库</span>
                   </div>
-                  <span className="tag">系统凭据库</span>
-                </div>
 
-                <label className="field-row">
-                  <span className="field-icon">
-                    <KeyRound size={17} />
-                  </span>
-                  <span className="field-copy">
-                    <strong>Notion Token</strong>
-                    <small>
-                      {hasToken
-                        ? "已保存；留空不会修改现有 Token"
-                        : "支持个人访问令牌、OAuth Token 或内部 Integration Token"}
-                    </small>
-                  </span>
-                  <input
-                    type="password"
-                    value={token}
-                    placeholder={hasToken ? "已保存在系统凭据库" : "ntn_..."}
-                    onChange={(event) => setToken(event.target.value)}
-                  />
-                </label>
-
-                <details className="advanced-settings">
-                  <summary>
-                    <span>内部 Integration 兼容设置</span>
-                    <small>仅内部 Token 需要</small>
-                  </summary>
-                  <div className="advanced-content">
-                    <label>
-                      <span>父页面 ID 或页面链接</span>
-                      <input
-                        value={config.rootPageId}
-                        placeholder="可选：内部 Integration Token 必填"
-                        onChange={(event) =>
-                          setConfig((current) => ({
-                            ...current,
-                            rootPageId: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                    <p>
-                      内部 Integration 无法直接创建工作区顶层页面。请先在 Notion
-                      中创建一个父页面，将该 Integration 添加为连接，再粘贴页面链接或 ID。
-                    </p>
-                  </div>
-                </details>
-
-                <div className="action-row">
-                  <button
-                    className="secondary"
-                    onClick={testConnection}
-                    disabled={!hasCredentials || Boolean(busy)}
-                  >
-                    {busy === "test" ? (
-                      <LoaderCircle className="spin" size={16} />
-                    ) : (
-                      <ShieldCheck size={16} />
-                    )}
-                    测试连接
-                  </button>
-                </div>
-              </section>
-
-              <section className="setup-block single-upload-block">
-                <div className="block-heading">
-                  <div>
-                    <h2>上传单个文件</h2>
-                    <p>默认以文件块保存；视频可切换为可直接播放的视频块。</p>
-                  </div>
-                  <span className="tag success">记录上传结果</span>
-                </div>
-
-                <div className="field-row">
-                  <span className="field-icon">
-                    <Video size={17} />
-                  </span>
-                  <span className="field-copy">
-                    <strong>
-                      {ffmpegStatus === null
-                        ? "正在检测 ffmpeg"
-                        : ffmpegStatus.available
-                          ? "ffmpeg 已就绪"
-                          : "未检测到 ffmpeg"}
-                    </strong>
-                    <small>
-                      {ffmpegStatus?.message || "正在检查系统 PATH 和常见安装目录"}
-                    </small>
-                  </span>
-                  <button className="secondary compact" onClick={refreshFfmpeg} disabled={Boolean(busy)}>
-                    <RefreshCw size={15} />
-                    重新检测
-                  </button>
-                </div>
-
-                <div className="field-row">
-                  <span className="field-icon">
-                    <File size={17} />
-                  </span>
-                  <span className="field-copy">
-                    <strong>{selectedFileName}</strong>
-                    <small>{selectedFilePath || "支持图片、PDF、文档、代码、视频及其他文件"}</small>
-                  </span>
-                  <button className="secondary compact" onClick={chooseSingleFile} disabled={Boolean(busy)}>
-                    选择文件
-                  </button>
-                </div>
-
-                <label className="toggle-row">
-                  <input
-                    type="radio"
-                    name="upload-display-mode"
-                    checked={uploadDisplayMode === "file"}
-                    onChange={() => setUploadDisplayMode("file")}
-                  />
-                  <span>
-                    <strong>以文件块保存（默认）</strong>
-                    <small>在 Notion 页面中显示为可下载附件，视频也按普通文件保存。</small>
-                  </span>
-                </label>
-
-                <label className="toggle-row">
-                  <input
-                    type="radio"
-                    name="upload-display-mode"
-                    checked={uploadDisplayMode === "video"}
-                    onChange={() => setUploadDisplayMode("video")}
-                  />
-                  <span>
-                    <strong>以视频块保存</strong>
-                    <small>仅适用于视频；分段视频会按顺序显示为多个可播放视频块。</small>
-                  </span>
-                </label>
-
-                <div className="action-row">
-                  <button className="primary" onClick={uploadSingleFile} disabled={!canUpload}>
-                    {busy === "upload" ? (
-                      <LoaderCircle className="spin" size={16} />
-                    ) : (
-                      <Upload size={16} />
-                    )}
-                    上传到 Notion
-                  </button>
-                </div>
-              </section>
-
-              {busy === "upload" && uploadProgress && (
-                <section className="progress-block">
-                  <div>
-                    <strong>{uploadProgress.stage}</strong>
-                    <span>
-                      {uploadProgress.current}/{uploadProgress.total}
+                  <label className="field-row">
+                    <span className="field-icon">
+                      <KeyRound size={17} />
                     </span>
+                    <span className="field-copy">
+                      <strong>Notion Token</strong>
+                      <small>
+                        {hasToken
+                          ? "已保存；留空不会修改现有 Token"
+                          : "支持个人访问令牌、OAuth Token 或内部 Integration Token"}
+                      </small>
+                    </span>
+                    <input
+                      type="password"
+                      value={token}
+                      placeholder={hasToken ? "已保存在系统凭据库" : "ntn_..."}
+                      onChange={(event) => setToken(event.target.value)}
+                    />
+                  </label>
+
+                  <details className="advanced-settings">
+                    <summary>
+                      <span>内部 Integration 兼容设置</span>
+                      <small>仅内部 Token 需要</small>
+                    </summary>
+                    <div className="advanced-content">
+                      <label>
+                        <span>父页面 ID 或页面链接</span>
+                        <input
+                          value={config.rootPageId}
+                          placeholder="可选：内部 Integration Token 必填"
+                          onChange={(event) =>
+                            setConfig((current) => ({
+                              ...current,
+                              rootPageId: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <p>
+                        内部 Integration 无法直接创建工作区顶层页面。请先在 Notion
+                        中创建一个父页面，将该 Integration 添加为连接，再粘贴页面链接或 ID。
+                      </p>
+                    </div>
+                  </details>
+
+                  <div className="action-row">
+                    <button
+                      className="secondary"
+                      onClick={testConnection}
+                      disabled={!hasCredentials || Boolean(busy)}
+                    >
+                      {busy === "test" ? (
+                        <LoaderCircle className="spin" size={16} />
+                      ) : (
+                        <ShieldCheck size={16} />
+                      )}
+                      测试连接
+                    </button>
                   </div>
-                  <div className="progress-track">
-                    <div style={{ width: `${uploadProgressPercent}%` }} />
-                  </div>
-                  <small>{uploadProgress.detail}</small>
                 </section>
               )}
 
-              <section className="preview-block">
-                <div className="block-heading">
-                  <div>
-                    <h2>上传记录</h2>
-                    <p>
-                      共 {uploadHistory.length} 条记录，成功 {successfulUploads} 条；最多保留最近 500 条。
-                    </p>
-                  </div>
-                  <button
-                    className="secondary"
-                    onClick={clearUploadHistory}
-                    disabled={uploadHistory.length === 0 || Boolean(busy)}
-                  >
-                    <Trash2 size={14} />
-                    清空记录
-                  </button>
-                </div>
+              {activeView === "upload" && (
+                <>
+                  {!hasCredentials && (
+                    <div className="notice info">
+                      <Settings2 size={18} />
+                      <span>请先在“连接设置”中保存 Notion Token。</span>
+                      <button onClick={() => switchView("settings")}>前往设置</button>
+                    </div>
+                  )}
 
-                {uploadHistory.length > 0 ? (
-                  <div className="file-list">
-                    {uploadHistory.map((record) => (
-                      <div className="file-row" key={record.id}>
-                        <span className="drag-handle">⋮⋮</span>
-                        <span className="file-icon">{fileIcon(record.mimeType)}</span>
-                        <div className="file-main">
-                          <strong>{record.fileName}</strong>
-                          <span>{record.filePath}</span>
-                          <span>
-                            {record.mimeType} · {formatBytes(record.size)} · {formatDate(record.uploadedAt)}
-                          </span>
-                          <span>
-                            保存方式：{record.displayMode === "video" ? "视频块" : "文件块"}
-                            {record.usedFfmpeg
-                              ? ` · ffmpeg 切分 ${record.segmentCount || 0} 段`
-                              : ""}
-                          </span>
-                          {record.pageUrl && <span>Notion：{record.pageUrl}</span>}
-                          {record.message && <span>{record.status === "failed" ? "失败原因" : "结果"}：{record.message}</span>}
-                        </div>
-                        <span className={`status ${record.status === "success" ? "status-new" : "status-modified"}`}>
-                          {record.status === "success" ? "已上传" : "失败"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="empty-state">
-                    <Clock3 size={34} />
-                    <h3>还没有单文件上传记录</h3>
-                    <p>选择文件并上传后，这里会记录文件、时间、状态和 Notion 页面地址。</p>
-                  </div>
-                )}
-              </section>
-
-              <section className="setup-block">
-                <div className="block-heading">
-                  <div>
-                    <h2>文件夹同步</h2>
-                    <p>选择文件夹后，将其中内容整理为一篇与文件夹同名的 Notion 文档。</p>
-                  </div>
-                  <span className="tag">单向同步</span>
-                </div>
-
-                <div className="field-row">
-                  <span className="field-icon">
-                    <FolderOpen size={17} />
-                  </span>
-                  <span className="field-copy">
-                    <strong>本地文件夹</strong>
-                    <small>{config.folderPath || "尚未选择文件夹"}</small>
-                  </span>
-                  <button className="secondary compact" onClick={chooseFolder} disabled={Boolean(busy)}>
-                    选择文件夹
-                  </button>
-                </div>
-
-                <label className="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={config.skipHidden}
-                    onChange={(event) =>
-                      setConfig((current) => ({
-                        ...current,
-                        skipHidden: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>
-                    <strong>忽略隐藏文件和构建目录</strong>
-                    <small>自动排除 .git、node_modules、target、dist 等目录</small>
-                  </span>
-                </label>
-
-                <div className="action-row">
-                  <button
-                    className="secondary"
-                    onClick={() => void scanPath(config.folderPath)}
-                    disabled={!canScan || Boolean(busy)}
-                  >
-                    {busy === "scan" ? (
-                      <LoaderCircle className="spin" size={16} />
-                    ) : (
-                      <RefreshCw size={16} />
-                    )}
-                    重新扫描
-                  </button>
-                  <button className="primary" onClick={startSync} disabled={!canSync}>
-                    {busy === "sync" ? (
-                      <LoaderCircle className="spin" size={16} />
-                    ) : (
-                      <Play size={16} fill="currentColor" />
-                    )}
-                    同步文件夹
-                  </button>
-                </div>
-              </section>
-
-              {busy === "sync" && progress && (
-                <section className="progress-block">
-                  <div>
-                    <strong>{progress.stage}</strong>
-                    <span>
-                      {progress.current}/{progress.total}
-                    </span>
-                  </div>
-                  <div className="progress-track">
-                    <div style={{ width: `${progressPercent}%` }} />
-                  </div>
-                  <small>{progress.relativePath}</small>
-                </section>
-              )}
-
-              <section className="preview-block">
-                <div className="block-heading">
-                  <div>
-                    <h2>文件夹文档预览</h2>
-                    <p>
-                      {scan
-                        ? `${scan.files.length} 个文件将整理到“${title}”中`
-                        : "选择文件夹后自动扫描内容"}
-                    </p>
-                  </div>
-                  {syncResult?.failed === 0 && <span className="tag success">已创建同名文档</span>}
-                </div>
-
-                {scan ? (
-                  <>
-                    <div className="stats-row">
+                  <section className="setup-block single-upload-block">
+                    <div className="block-heading">
                       <div>
-                        <strong>{scan.files.length}</strong>
-                        <span>文件</span>
+                        <h2>上传单个文件</h2>
+                        <p>默认以文件块保存；视频可切换为可直接播放的视频块。</p>
                       </div>
-                      <div>
-                        <strong>{formatBytes(scan.totalBytes)}</strong>
-                        <span>总大小</span>
-                      </div>
-                      <div>
-                        <strong>{scan.changedCount}</strong>
-                        <span>待同步</span>
-                      </div>
-                      <div>
-                        <strong>{scan.deletedCount}</strong>
-                        <span>将移除</span>
-                      </div>
+                      <span className="tag success">记录上传结果</span>
                     </div>
 
+                    <div className="field-row">
+                      <span className="field-icon">
+                        <Video size={17} />
+                      </span>
+                      <span className="field-copy">
+                        <strong>
+                          {ffmpegStatus === null
+                            ? "正在检测 ffmpeg"
+                            : ffmpegStatus.available
+                              ? "ffmpeg 已就绪"
+                              : "未检测到 ffmpeg"}
+                        </strong>
+                        <small>
+                          {ffmpegStatus?.message || "正在检查系统 PATH 和常见安装目录"}
+                        </small>
+                      </span>
+                      <button
+                        className="secondary compact"
+                        onClick={refreshFfmpeg}
+                        disabled={Boolean(busy)}
+                      >
+                        <RefreshCw size={15} />
+                        重新检测
+                      </button>
+                    </div>
+
+                    <div className="field-row">
+                      <span className="field-icon">
+                        <File size={17} />
+                      </span>
+                      <span className="field-copy">
+                        <strong>{selectedFileName}</strong>
+                        <small>{selectedFilePath || "支持图片、PDF、文档、代码、视频及其他文件"}</small>
+                      </span>
+                      <button
+                        className="secondary compact"
+                        onClick={chooseSingleFile}
+                        disabled={Boolean(busy)}
+                      >
+                        选择文件
+                      </button>
+                    </div>
+
+                    <label className="toggle-row">
+                      <input
+                        type="radio"
+                        name="upload-display-mode"
+                        checked={uploadDisplayMode === "file"}
+                        onChange={() => setUploadDisplayMode("file")}
+                      />
+                      <span>
+                        <strong>以文件块保存（默认）</strong>
+                        <small>在 Notion 页面中显示为可下载附件，视频也按普通文件保存。</small>
+                      </span>
+                    </label>
+
+                    <label className="toggle-row">
+                      <input
+                        type="radio"
+                        name="upload-display-mode"
+                        checked={uploadDisplayMode === "video"}
+                        onChange={() => setUploadDisplayMode("video")}
+                      />
+                      <span>
+                        <strong>以视频块保存</strong>
+                        <small>仅适用于视频；分段视频会按顺序显示为多个可播放视频块。</small>
+                      </span>
+                    </label>
+
+                    <div className="action-row">
+                      <button className="primary" onClick={uploadSingleFile} disabled={!canUpload}>
+                        {busy === "upload" ? (
+                          <LoaderCircle className="spin" size={16} />
+                        ) : (
+                          <Upload size={16} />
+                        )}
+                        上传到 Notion
+                      </button>
+                    </div>
+                  </section>
+
+                  {busy === "upload" && uploadProgress && (
+                    <section className="progress-block">
+                      <div>
+                        <strong>{uploadProgress.stage}</strong>
+                        <span>
+                          {uploadProgress.current}/{uploadProgress.total}
+                        </span>
+                      </div>
+                      <div className="progress-track">
+                        <div style={{ width: `${uploadProgressPercent}%` }} />
+                      </div>
+                      <small>{uploadProgress.detail}</small>
+                    </section>
+                  )}
+                </>
+              )}
+
+              {activeView === "history" && (
+                <section className="preview-block">
+                  <div className="block-heading">
+                    <div>
+                      <h2>上传记录</h2>
+                      <p>
+                        共 {uploadHistory.length} 条记录，成功 {successfulUploads} 条；最多保留最近 500 条。
+                      </p>
+                    </div>
+                    <button
+                      className="secondary"
+                      onClick={clearUploadHistory}
+                      disabled={uploadHistory.length === 0 || Boolean(busy)}
+                    >
+                      <Trash2 size={14} />
+                      清空记录
+                    </button>
+                  </div>
+
+                  {uploadHistory.length > 0 ? (
                     <div className="file-list">
-                      {scan.files.map((file) => (
-                        <div className="file-row" key={file.relativePath}>
+                      {uploadHistory.map((record) => (
+                        <div className="file-row" key={record.id}>
                           <span className="drag-handle">⋮⋮</span>
-                          <span className="file-icon">{fileIcon(file.mimeType)}</span>
+                          <span className="file-icon">{fileIcon(record.mimeType)}</span>
                           <div className="file-main">
-                            <strong>{file.relativePath}</strong>
+                            <strong>{record.fileName}</strong>
+                            <span>{record.filePath}</span>
                             <span>
-                              {file.mimeType} · {formatBytes(file.size)}
+                              {record.mimeType} · {formatBytes(record.size)} · {formatDate(record.uploadedAt)}
                             </span>
+                            <span>
+                              保存方式：{record.displayMode === "video" ? "视频块" : "文件块"}
+                              {record.usedFfmpeg
+                                ? ` · ffmpeg 切分 ${record.segmentCount || 0} 段`
+                                : ""}
+                            </span>
+                            {record.pageUrl && <span>Notion：{record.pageUrl}</span>}
+                            {record.message && (
+                              <span>
+                                {record.status === "failed" ? "失败原因" : "结果"}：{record.message}
+                              </span>
+                            )}
                           </div>
-                          <span className={`status status-${file.status}`}>
-                            {file.status === "new"
-                              ? "新增"
-                              : file.status === "modified"
-                                ? "已修改"
-                                : "未变化"}
+                          <span
+                            className={`status ${
+                              record.status === "success" ? "status-new" : "status-modified"
+                            }`}
+                          >
+                            {record.status === "success" ? "已上传" : "失败"}
                           </span>
                         </div>
                       ))}
                     </div>
-                  </>
-                ) : (
-                  <div className="empty-state">
-                    <div className="empty-icon">📂</div>
-                    <h3>还没有选择文件夹</h3>
-                    <p>选择后会显示将写入同名 Notion 文档的文件结构。</p>
-                  </div>
-                )}
-              </section>
-
-              {syncResult?.failed ? (
-                <section className="failure-block">
-                  <h2>未写入的文件</h2>
-                  {syncResult.items
-                    .filter((item) => item.status === "failed")
-                    .map((item) => (
-                      <div key={item.relativePath}>
-                        <strong>{item.relativePath}</strong>
-                        <span>{item.message}</span>
-                      </div>
-                    ))}
+                  ) : (
+                    <div className="empty-state">
+                      <Clock3 size={34} />
+                      <h3>还没有单文件上传记录</h3>
+                      <p>选择文件并上传后，这里会记录文件、时间、状态和 Notion 页面地址。</p>
+                    </div>
+                  )}
                 </section>
-              ) : null}
+              )}
+
+              {activeView === "folder" && (
+                <>
+                  {!hasCredentials && (
+                    <div className="notice info">
+                      <Settings2 size={18} />
+                      <span>请先在“连接设置”中保存 Notion Token。</span>
+                      <button onClick={() => switchView("settings")}>前往设置</button>
+                    </div>
+                  )}
+
+                  <section className="setup-block">
+                    <div className="block-heading">
+                      <div>
+                        <h2>文件夹同步</h2>
+                        <p>选择文件夹后，将其中内容整理为一篇与文件夹同名的 Notion 文档。</p>
+                      </div>
+                      <span className="tag">单向同步</span>
+                    </div>
+
+                    <div className="field-row">
+                      <span className="field-icon">
+                        <FolderOpen size={17} />
+                      </span>
+                      <span className="field-copy">
+                        <strong>本地文件夹</strong>
+                        <small>{config.folderPath || "尚未选择文件夹"}</small>
+                      </span>
+                      <button
+                        className="secondary compact"
+                        onClick={chooseFolder}
+                        disabled={Boolean(busy)}
+                      >
+                        选择文件夹
+                      </button>
+                    </div>
+
+                    <label className="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={config.skipHidden}
+                        onChange={(event) =>
+                          setConfig((current) => ({
+                            ...current,
+                            skipHidden: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>
+                        <strong>忽略隐藏文件和构建目录</strong>
+                        <small>自动排除 .git、node_modules、target、dist 等目录</small>
+                      </span>
+                    </label>
+
+                    <div className="action-row">
+                      <button
+                        className="secondary"
+                        onClick={() => void scanPath(config.folderPath)}
+                        disabled={!canScan || Boolean(busy)}
+                      >
+                        {busy === "scan" ? (
+                          <LoaderCircle className="spin" size={16} />
+                        ) : (
+                          <RefreshCw size={16} />
+                        )}
+                        重新扫描
+                      </button>
+                      <button className="primary" onClick={startSync} disabled={!canSync}>
+                        {busy === "sync" ? (
+                          <LoaderCircle className="spin" size={16} />
+                        ) : (
+                          <Play size={16} fill="currentColor" />
+                        )}
+                        同步文件夹
+                      </button>
+                    </div>
+                  </section>
+
+                  {busy === "sync" && progress && (
+                    <section className="progress-block">
+                      <div>
+                        <strong>{progress.stage}</strong>
+                        <span>
+                          {progress.current}/{progress.total}
+                        </span>
+                      </div>
+                      <div className="progress-track">
+                        <div style={{ width: `${progressPercent}%` }} />
+                      </div>
+                      <small>{progress.relativePath}</small>
+                    </section>
+                  )}
+
+                  <section className="preview-block">
+                    <div className="block-heading">
+                      <div>
+                        <h2>文件夹文档预览</h2>
+                        <p>
+                          {scan
+                            ? `${scan.files.length} 个文件将整理到“${title}”中`
+                            : "选择文件夹后自动扫描内容"}
+                        </p>
+                      </div>
+                      {syncResult?.failed === 0 && <span className="tag success">已创建同名文档</span>}
+                    </div>
+
+                    {scan ? (
+                      <>
+                        <div className="stats-row">
+                          <div>
+                            <strong>{scan.files.length}</strong>
+                            <span>文件</span>
+                          </div>
+                          <div>
+                            <strong>{formatBytes(scan.totalBytes)}</strong>
+                            <span>总大小</span>
+                          </div>
+                          <div>
+                            <strong>{scan.changedCount}</strong>
+                            <span>待同步</span>
+                          </div>
+                          <div>
+                            <strong>{scan.deletedCount}</strong>
+                            <span>将移除</span>
+                          </div>
+                        </div>
+
+                        <div className="file-list">
+                          {scan.files.map((file) => (
+                            <div className="file-row" key={file.relativePath}>
+                              <span className="drag-handle">⋮⋮</span>
+                              <span className="file-icon">{fileIcon(file.mimeType)}</span>
+                              <div className="file-main">
+                                <strong>{file.relativePath}</strong>
+                                <span>
+                                  {file.mimeType} · {formatBytes(file.size)}
+                                </span>
+                              </div>
+                              <span className={`status status-${file.status}`}>
+                                {file.status === "new"
+                                  ? "新增"
+                                  : file.status === "modified"
+                                    ? "已修改"
+                                    : "未变化"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="empty-state">
+                        <div className="empty-icon">📂</div>
+                        <h3>还没有选择文件夹</h3>
+                        <p>选择后会显示将写入同名 Notion 文档的文件结构。</p>
+                      </div>
+                    )}
+                  </section>
+
+                  {syncResult?.failed ? (
+                    <section className="failure-block">
+                      <h2>未写入的文件</h2>
+                      {syncResult.items
+                        .filter((item) => item.status === "failed")
+                        .map((item) => (
+                          <div key={item.relativePath}>
+                            <strong>{item.relativePath}</strong>
+                            <span>{item.message}</span>
+                          </div>
+                        ))}
+                    </section>
+                  ) : null}
+                </>
+              )}
             </div>
           </section>
         </div>
