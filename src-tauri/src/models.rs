@@ -236,6 +236,63 @@ pub struct DriveDownloadRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DriveFolderDownloadRequest {
+    pub folder_id: String,
+    pub destination_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveBatchItemResult {
+    pub node_id: String,
+    pub logical_path: String,
+    pub destination_path: String,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveFolderDownloadResult {
+    pub folder_id: String,
+    pub destination_directory: String,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub items: Vec<DriveBatchItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveVersion {
+    pub id: String,
+    pub node_id: String,
+    pub version: i64,
+    pub size: u64,
+    pub sha256: String,
+    pub mime_type: String,
+    pub file_upload_id: String,
+    pub notion_block_id: String,
+    pub original_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveVersionUploadRequest {
+    pub node_id: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveVersionDownloadRequest {
+    pub version_id: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DriveInitResult {
     pub database_id: String,
     pub data_source_id: String,
