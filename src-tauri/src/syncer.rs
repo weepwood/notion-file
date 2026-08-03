@@ -1,3 +1,4 @@
+use crate::file_upload;
 use crate::models::{
     SyncEntry, SyncItemResult, SyncProgress, SyncRequest, SyncResult, SyncState,
 };
@@ -5,6 +6,7 @@ use crate::notion::{
     divider_block, file_block, folder_summary_callout, heading_block, metadata_callout,
     page_url_from_id, text_blocks, CreatedPage, NotionClient,
 };
+use crate::notion_request::NotionHttp;
 use crate::{scanner, storage};
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -26,7 +28,9 @@ pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncRe
         anyhow::bail!("请先选择本地文件夹");
     }
 
-    let notion = NotionClient::new(storage::load_token()?)?;
+    let token = storage::load_token()?;
+    let notion = NotionClient::new(token.clone())?;
+    let upload_http = NotionHttp::new(token)?;
     if !request.root_page_id.trim().is_empty() {
         notion
             .get_page_title(&request.root_page_id)
@@ -109,7 +113,15 @@ pub async fn synchronize(app: &AppHandle, request: SyncRequest) -> Result<SyncRe
             "正在准备文档内容",
         );
 
-        match build_file_section(&notion, file).await {
+        match build_file_section(
+            app,
+            &upload_http,
+            file,
+            index + 1,
+            scan.files.len(),
+        )
+        .await
+        {
             Ok(mut section) => {
                 blocks.append(&mut section);
                 items.push(SyncItemResult {
@@ -285,8 +297,11 @@ fn create_page_error(request: &SyncRequest, error: anyhow::Error) -> anyhow::Err
 }
 
 async fn build_file_section(
-    notion: &NotionClient,
+    app: &AppHandle,
+    upload_http: &NotionHttp,
     file: &crate::models::ScannedFile,
+    file_number: usize,
+    file_total: usize,
 ) -> Result<Vec<Value>> {
     let path = Path::new(&file.absolute_path);
     let extension = path
@@ -311,7 +326,49 @@ async fn build_file_section(
             .map_err(|error| anyhow::anyhow!("文本文件不是有效 UTF-8：{error}"))?;
         blocks.extend(text_blocks(&content, &extension));
     } else {
-        let upload_id = notion.upload_file(path, &file.mime_type).await?;
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("file");
+
+        if file.size > file_upload::MAX_SINGLE_PART_SIZE {
+            let parts = file_upload::part_count(file.size);
+            emit_progress(
+                app,
+                file_number,
+                file_total,
+                &file.relative_path,
+                &format!("正在分片上传（0/{parts}）"),
+            );
+        } else {
+            emit_progress(
+                app,
+                file_number,
+                file_total,
+                &file.relative_path,
+                "正在上传附件",
+            );
+        }
+
+        let upload_id = file_upload::upload_file(
+            upload_http,
+            path,
+            file_name,
+            &file.mime_type,
+            file.size,
+            |part_number, number_of_parts| {
+                emit_progress(
+                    app,
+                    file_number,
+                    file_total,
+                    &file.relative_path,
+                    &format!("正在分片上传（{part_number}/{number_of_parts}）"),
+                );
+            },
+        )
+        .await
+        .with_context(|| format!("上传附件“{}”失败", file.relative_path))?;
         blocks.push(file_block(&upload_id, &file.mime_type));
     }
 
