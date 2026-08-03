@@ -1,4 +1,5 @@
-use crate::models::{AppConfig, SyncState};
+use crate::database;
+use crate::models::{AppConfig, SyncState, UploadRecord};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -19,6 +20,10 @@ fn config_path(app: &AppHandle) -> Result<PathBuf> {
 
 fn state_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(app.path().app_data_dir()?.join("sync-state.json"))
+}
+
+fn upload_history_path(app: &AppHandle) -> Result<PathBuf> {
+    Ok(app.path().app_data_dir()?.join("upload-history.json"))
 }
 
 pub fn load_config(app: &AppHandle) -> Result<AppConfig> {
@@ -49,6 +54,21 @@ pub fn save_state(app: &AppHandle, state: &SyncState) -> Result<()> {
     let path = state_path(app)?;
     ensure_parent(&path)?;
     std::fs::write(path, serde_json::to_string_pretty(state)?).context("无法写入同步状态")
+}
+
+pub fn load_upload_history(app: &AppHandle) -> Result<Vec<UploadRecord>> {
+    let legacy_path = upload_history_path(app)?;
+    database::load_upload_history(app, &legacy_path)
+}
+
+pub fn append_upload_record(app: &AppHandle, record: UploadRecord) -> Result<()> {
+    let legacy_path = upload_history_path(app)?;
+    database::append_upload_record(app, &legacy_path, &record)
+}
+
+pub fn clear_upload_history(app: &AppHandle) -> Result<()> {
+    let legacy_path = upload_history_path(app)?;
+    database::clear_upload_history(app, &legacy_path)
 }
 
 fn token_entry() -> Result<keyring::Entry> {

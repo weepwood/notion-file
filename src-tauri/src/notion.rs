@@ -1,10 +1,10 @@
+use crate::notion_request::{parse_json_response, NotionHttp, NotionRequest};
 use anyhow::{Context, Result};
-use reqwest::{multipart, Client, Response};
+use reqwest::{Method, Response};
 use serde_json::{json, Value};
 use std::path::Path;
 
 const NOTION_BASE_URL: &str = "https://api.notion.com/v1";
-const NOTION_VERSION: &str = "2026-03-11";
 const MAX_SINGLE_PART_FILE_SIZE: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -15,51 +15,27 @@ pub struct CreatedPage {
 
 #[derive(Clone)]
 pub struct NotionClient {
-    client: Client,
-    token: String,
+    http: NotionHttp,
 }
 
 impl NotionClient {
     pub fn new(token: String) -> Result<Self> {
-        let client = Client::builder()
-            .user_agent("notion-file/0.2.0")
-            .build()
-            .context("无法初始化 HTTP 客户端")?;
-        Ok(Self { client, token })
+        Ok(Self {
+            http: NotionHttp::new(token)?,
+        })
     }
 
-    fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
-        self.client
-            .request(method, url)
-            .bearer_auth(&self.token)
-            .header("Notion-Version", NOTION_VERSION)
-            .header("Accept", "application/json")
+    fn request(&self, method: Method, url: String) -> NotionRequest {
+        self.http.request(method, url)
     }
 
     async fn parse(response: Response) -> Result<Value> {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or(text);
-            anyhow::bail!("Notion API 请求失败（{}）：{}", status.as_u16(), message);
-        }
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).context("Notion API 返回了无效 JSON")
+        parse_json_response(response, "Notion API 请求").await
     }
 
     pub async fn get_connection_label(&self) -> Result<String> {
         let response = self
-            .request(reqwest::Method::GET, format!("{NOTION_BASE_URL}/users/me"))
+            .request(Method::GET, format!("{NOTION_BASE_URL}/users/me"))
             .send()
             .await?;
         let value = Self::parse(response).await?;
@@ -75,7 +51,7 @@ impl NotionClient {
         let page_id = normalize_page_id(page_id)?;
         let response = self
             .request(
-                reqwest::Method::GET,
+                Method::GET,
                 format!("{NOTION_BASE_URL}/pages/{page_id}"),
             )
             .send()
@@ -128,7 +104,7 @@ impl NotionClient {
         };
 
         let response = self
-            .request(reqwest::Method::POST, format!("{NOTION_BASE_URL}/pages"))
+            .request(Method::POST, format!("{NOTION_BASE_URL}/pages"))
             .json(&body)
             .send()
             .await?;
@@ -150,7 +126,7 @@ impl NotionClient {
         let page_id = normalize_page_id(page_id)?;
         let response = self
             .request(
-                reqwest::Method::PATCH,
+                Method::PATCH,
                 format!("{NOTION_BASE_URL}/pages/{page_id}"),
             )
             .json(&json!({ "in_trash": true }))
@@ -171,8 +147,7 @@ impl NotionClient {
                 url.push_str("&start_cursor=");
                 url.push_str(value);
             }
-            let value =
-                Self::parse(self.request(reqwest::Method::GET, url).send().await?).await?;
+            let value = Self::parse(self.request(Method::GET, url).send().await?).await?;
             if let Some(results) = value.get("results").and_then(Value::as_array) {
                 block_ids.extend(
                     results
@@ -200,7 +175,7 @@ impl NotionClient {
         for block_id in block_ids {
             Self::parse(
                 self.request(
-                    reqwest::Method::DELETE,
+                    Method::DELETE,
                     format!("{NOTION_BASE_URL}/blocks/{block_id}"),
                 )
                 .send()
@@ -219,7 +194,7 @@ impl NotionClient {
         for chunk in blocks.chunks(100) {
             let response = self
                 .request(
-                    reqwest::Method::PATCH,
+                    Method::PATCH,
                     format!("{NOTION_BASE_URL}/blocks/{page_id}/children"),
                 )
                 .json(&json!({ "children": chunk }))
@@ -242,17 +217,14 @@ impl NotionClient {
             .unwrap_or("file");
 
         let created = Self::parse(
-            self.request(
-                reqwest::Method::POST,
-                format!("{NOTION_BASE_URL}/file_uploads"),
-            )
-            .json(&json!({
-                "mode": "single_part",
-                "filename": file_name,
-                "content_type": mime_type
-            }))
-            .send()
-            .await?,
+            self.request(Method::POST, format!("{NOTION_BASE_URL}/file_uploads"))
+                .json(&json!({
+                    "mode": "single_part",
+                    "filename": file_name,
+                    "content_type": mime_type
+                }))
+                .send()
+                .await?,
         )
         .await?;
 
@@ -267,16 +239,9 @@ impl NotionClient {
             .unwrap_or_else(|| format!("{NOTION_BASE_URL}/file_uploads/{upload_id}/send"));
 
         let bytes = tokio::fs::read(path).await?;
-        let part = multipart::Part::bytes(bytes)
-            .file_name(file_name.to_string())
-            .mime_str(mime_type)?;
         let response = self
-            .client
-            .post(upload_url)
-            .bearer_auth(&self.token)
-            .header("Notion-Version", NOTION_VERSION)
-            .multipart(multipart::Form::new().part("file", part))
-            .send()
+            .http
+            .send_multipart(upload_url, file_name, mime_type, bytes, None)
             .await?;
         let uploaded = Self::parse(response).await?;
 

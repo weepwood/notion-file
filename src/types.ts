@@ -6,6 +6,8 @@ export type SyncStatus =
   | "failed"
   | "synced";
 
+export type UploadDisplayMode = "file" | "video";
+
 export interface AppConfig {
   folderPath: string;
   rootPageId: string;
@@ -60,9 +62,41 @@ export interface SyncResult {
   items: SyncItemResult[];
 }
 
+export interface FfmpegStatus {
+  available: boolean;
+  ffmpegPath?: string;
+  ffprobePath?: string;
+  version?: string;
+  message: string;
+}
+
+export interface UploadRecord {
+  id: string;
+  filePath: string;
+  fileName: string;
+  size: number;
+  mimeType: string;
+  sha256: string;
+  uploadedAt: string;
+  status: "success" | "failed";
+  pageId?: string;
+  pageUrl?: string;
+  message?: string;
+  displayMode?: UploadDisplayMode;
+  segmentCount?: number;
+  usedFfmpeg?: boolean;
+}
+
 export interface SyncProgress {
   current: number;
   total: number;
   relativePath: string;
   stage: string;
+}
+
+export interface UploadProgress {
+  current: number;
+  total: number;
+  stage: string;
+  detail: string;
 }
