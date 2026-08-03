@@ -714,6 +714,61 @@ export default function App() {
     }
   }
 
+  function renderQueueJob(job: DriveQueueJob) {
+    const percent = job.size
+      ? Math.min(100, Math.round((job.transferredBytes / job.size) * 100))
+      : 0;
+    return (
+      <div className={`queue-item ${job.status}`} key={job.id}>
+        <i><Upload size={17} /></i>
+        <div className="queue-copy">
+          <strong>{job.fileName}</strong>
+          <span>{job.lastError ?? job.filePath}</span>
+          <div className="mini-progress"><div style={{ width: `${percent}%` }} /></div>
+        </div>
+        <div className="queue-size">{formatBytes(job.transferredBytes)} / {formatBytes(job.size)}</div>
+        <div className="queue-attempts">尝试 {job.attempts}</div>
+        <em className={`transfer-status ${job.status}`}>{queueStatusLabel(job.status)}</em>
+        <div className="queue-actions">
+          {(job.status === "failed" || job.status === "cancelled") && (
+            <button onClick={() => retryQueueJob(job.id)}><RefreshCw size={12} />重试</button>
+          )}
+          {(job.status === "pending" || job.status === "failed") && (
+            <button onClick={() => cancelQueueJob(job.id)}><X size={12} />取消</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderTransferHistory(transfer: DriveTransfer) {
+    const percent = transfer.totalBytes
+      ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100))
+      : 0;
+    const resumable =
+      transfer.direction === "download" &&
+      transfer.status === "failed" &&
+      Boolean(transfer.localPath) &&
+      Boolean(transfer.nodeId);
+    return (
+      <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}>
+        <i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i>
+        <div className="transfer-copy">
+          <strong>{transfer.fileName}</strong>
+          <span>{transfer.message ?? transfer.localPath ?? ""}</span>
+          <div className="mini-progress"><div style={{ width: `${percent}%` }} /></div>
+        </div>
+        <div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div>
+        <em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>
+        {resumable && (
+          <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}>
+            <RefreshCw size={12} />续传
+          </button>
+        )}
+      </div>
+    );
+  }
+
   const progressPercent = progress?.totalBytes
     ? Math.min(100, Math.round((progress.transferredBytes / progress.totalBytes) * 100))
     : 0;
@@ -775,41 +830,48 @@ export default function App() {
             </section>
           )}
 
-          {view === "transfers" && <section>
-            <div className="section-heading">
-              <div><h1>传输中心</h1><p>上传任务写入 SQLite 后由 Rust 后台顺序执行，应用重启会自动恢复未完成任务。</p></div>
-              <div className="queue-toolbar">
-                <button onClick={() => setQueuePaused(!uploadQueue.paused)}>
-                  {uploadQueue.paused ? <Play size={15} /> : <Pause size={15} />}
-                  {uploadQueue.paused ? "继续队列" : "暂停队列"}
-                </button>
-                <button onClick={clearFinishedQueue}><Trash2 size={15} />清理已完成队列</button>
-                <button onClick={clearTransfers}><Trash2 size={15} />清理传输记录</button>
+          {view === "transfers" && (
+            <section>
+              <div className="section-heading">
+                <div>
+                  <h1>传输中心</h1>
+                  <p>上传任务写入 SQLite 后由 Rust 后台顺序执行，应用重启会自动恢复未完成任务。</p>
+                </div>
+                <div className="queue-toolbar">
+                  <button onClick={() => setQueuePaused(!uploadQueue.paused)}>
+                    {uploadQueue.paused ? <Play size={15} /> : <Pause size={15} />}
+                    {uploadQueue.paused ? "继续队列" : "暂停队列"}
+                  </button>
+                  <button onClick={clearFinishedQueue}><Trash2 size={15} />清理已完成队列</button>
+                  <button onClick={clearTransfers}><Trash2 size={15} />清理传输记录</button>
+                </div>
               </div>
-            </div>
-            <div className={`queue-summary ${uploadQueue.paused ? "paused" : ""}`}>
-              <div><strong>{uploadQueue.paused ? "队列已暂停" : uploadQueue.workerRunning ? "队列执行中" : "队列空闲"}</strong><span>等待 {uploadQueue.pendingCount} · 失败 {uploadQueue.failedCount}</span></div>
-              <small>暂停会在当前文件结束后生效；正在发送的 HTTP 请求不会被强行中断。</small>
-            </div>
-            <div className="queue-list">
-              {uploadQueue.jobs.length === 0 ? <div className="empty-state"><Upload size={36} /><strong>暂无持久化上传任务</strong></div> : uploadQueue.jobs.map((job) => {
-                const percent = job.size ? Math.min(100, Math.round(job.transferredBytes / job.size * 100)) : 0;
-                return <div className={`queue-item ${job.status}`} key={job.id}>
-                  <i><Upload size={17} /></i>
-                  <div className="queue-copy"><strong>{job.fileName}</strong><span>{job.lastError ?? job.filePath}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div></div>
-                  <div className="queue-size">{formatBytes(job.transferredBytes)} / {formatBytes(job.size)}</div>
-                  <div className="queue-attempts">尝试 {job.attempts}</div>
-                  <em className={`transfer-status ${job.status}`}>{queueStatusLabel(job.status)}</em>
-                  <div className="queue-actions">
-                    {(job.status === "failed" || job.status === "cancelled") && <button onClick={() => retryQueueJob(job.id)}><RefreshCw size={12} />重试</button>}
-                    {(job.status === "pending" || job.status === "failed") && <button onClick={() => cancelQueueJob(job.id)}><X size={12} />取消</button>}
-                  </div>
-                </div>;
-              })}
-            </div>
-            <div className="section-heading transfer-history-heading"><div><h2>传输历史</h2><p>下载失败会保留 .part 临时文件，可从已完成字节继续。</p></div></div>
-            <div className="transfer-list">{transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => { const percent = transfer.totalBytes ? Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)) : 0; const resumable = transfer.direction === "download" && transfer.status === "failed" && Boolean(transfer.localPath) && Boolean(transfer.nodeId); return <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}><i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i><div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message ?? transfer.localPath ?? ""}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div><div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div><em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>{resumable && <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}><RefreshCw size={12} />续传</button>}</div>; })}</div>
-          </section>}
+              <div className={`queue-summary ${uploadQueue.paused ? "paused" : ""}`}>
+                <div>
+                  <strong>{uploadQueue.paused ? "队列已暂停" : uploadQueue.workerRunning ? "队列执行中" : "队列空闲"}</strong>
+                  <span>等待 {uploadQueue.pendingCount} · 失败 {uploadQueue.failedCount}</span>
+                </div>
+                <small>暂停会在当前文件结束后生效；正在发送的 HTTP 请求不会被强行中断。</small>
+              </div>
+              <div className="queue-list">
+                {uploadQueue.jobs.length === 0 ? (
+                  <div className="empty-state"><Upload size={36} /><strong>暂无持久化上传任务</strong></div>
+                ) : (
+                  uploadQueue.jobs.map(renderQueueJob)
+                )}
+              </div>
+              <div className="section-heading transfer-history-heading">
+                <div><h2>传输历史</h2><p>下载失败会保留 .part 临时文件，可从已完成字节继续。</p></div>
+              </div>
+              <div className="transfer-list">
+                {transfers.length === 0 ? (
+                  <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div>
+                ) : (
+                  transfers.map(renderTransferHistory)
+                )}
+              </div>
+            </section>
+          )}
 
           {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div></section>}
 

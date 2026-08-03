@@ -262,7 +262,7 @@ fn spawn_worker(app: AppHandle) {
 
 async fn worker_loop(app: &AppHandle) -> Result<()> {
     loop {
-        if queue_paused(app)? {
+        if queue_paused(app)? || drive_context(app).is_err() {
             break;
         }
         let Some(job) = claim_next(app)? else {
@@ -320,7 +320,12 @@ async fn recover_existing_remote_node(
     let Some(mut node) = nodes.into_iter().find(|item| item.id == job.node_id) else {
         return Ok(None);
     };
-    if node.notion_block_id.as_deref().is_none_or(str::is_empty) {
+    if node
+        .notion_block_id
+        .as_deref()
+        .map(str::is_empty)
+        .unwrap_or(true)
+    {
         if let Some(upload_id) = node.file_upload_id.clone().filter(|value| !value.is_empty()) {
             let mime_type = node
                 .mime_type
@@ -416,12 +421,13 @@ fn queue_contains_active_path(
     path: &Path,
     parent_id: Option<&str>,
 ) -> Result<bool> {
+    let path_text = path.to_string_lossy().to_string();
     let count: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM drive_upload_queue
          WHERE file_path = ?1
            AND COALESCE(parent_id, '') = COALESCE(?2, '')
            AND status IN ('pending', 'running')",
-        params![path.to_string_lossy(), parent_id],
+        params![path_text, parent_id],
         |row| row.get(0),
     )?;
     Ok(count > 0)

@@ -90,8 +90,6 @@ pub fn list_nodes(app: &AppHandle, include_trashed: bool) -> Result<Vec<DriveNod
 }
 
 pub fn list_transfers(app: &AppHandle) -> Result<Vec<DriveTransfer>> {
-    let now = Utc::now().to_rfc3339();
-    storage::mark_interrupted_transfers(app, &now)?;
     storage::list_drive_transfers(app)
 }
 
@@ -157,6 +155,7 @@ pub async fn upload_file(app: &AppHandle, request: DriveUploadRequest) -> Result
 }
 
 pub fn recover_queue(app: AppHandle) -> Result<()> {
+    storage::mark_interrupted_transfers(&app, &Utc::now().to_rfc3339())?;
     queue::recover_and_start(app)
 }
 

@@ -17,7 +17,7 @@ use models::{
     DriveVersionDownloadRequest, DriveVersionUploadRequest, FfmpegStatus, ScanResult,
     SingleUploadRequest, SyncRequest, SyncResult, UploadRecord,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[tauri::command]
 fn get_saved_config(app: AppHandle) -> Result<AppConfig, String> {
