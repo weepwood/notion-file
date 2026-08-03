@@ -1,11 +1,13 @@
 mod advanced;
 mod notion_index;
+mod queue;
 mod transfer;
 mod version_store;
 
 use crate::models::{
     AppConfig, DriveDownloadRequest, DriveFolderDownloadRequest, DriveFolderDownloadResult,
-    DriveInitResult, DriveNode, DriveTransfer, DriveUploadRequest, DriveVersion,
+    DriveInitResult, DriveNode, DriveQueueEnqueueRequest, DriveQueueSnapshot, DriveTransfer,
+    DriveUploadRequest, DriveVersion,
     DriveVersionDownloadRequest, DriveVersionUploadRequest,
 };
 use crate::notion::normalize_page_id;
@@ -61,6 +63,7 @@ pub async fn initialize(app: &AppHandle, root_page_id: String) -> Result<DriveIn
         let _ = version_store::ensure_current_version(app, node);
     }
 
+    queue::start_if_ready(app);
     Ok(DriveInitResult {
         database_id,
         data_source_id,
@@ -88,8 +91,6 @@ pub fn list_nodes(app: &AppHandle, include_trashed: bool) -> Result<Vec<DriveNod
 }
 
 pub fn list_transfers(app: &AppHandle) -> Result<Vec<DriveTransfer>> {
-    let now = Utc::now().to_rfc3339();
-    storage::mark_interrupted_transfers(app, &now)?;
     storage::list_drive_transfers(app)
 }
 
@@ -152,6 +153,46 @@ pub async fn create_folder(
 
 pub async fn upload_file(app: &AppHandle, request: DriveUploadRequest) -> Result<DriveNode> {
     transfer::upload_file(app, request).await
+}
+
+pub fn recover_queue(app: AppHandle) -> Result<()> {
+    storage::mark_interrupted_transfers(&app, &Utc::now().to_rfc3339())?;
+    queue::recover_and_start(app)
+}
+
+pub fn start_queue_if_ready(app: &AppHandle) {
+    queue::start_if_ready(app);
+}
+
+pub fn queue_snapshot(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::snapshot(app)
+}
+
+pub fn enqueue_uploads(
+    app: &AppHandle,
+    request: DriveQueueEnqueueRequest,
+) -> Result<DriveQueueSnapshot> {
+    queue::enqueue(app, request)
+}
+
+pub fn pause_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::pause(app)
+}
+
+pub fn resume_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::resume(app)
+}
+
+pub fn retry_queue_job(app: &AppHandle, job_id: String) -> Result<DriveQueueSnapshot> {
+    queue::retry(app, job_id)
+}
+
+pub fn cancel_queue_job(app: &AppHandle, job_id: String) -> Result<DriveQueueSnapshot> {
+    queue::cancel(app, job_id)
+}
+
+pub fn clear_finished_queue(app: &AppHandle) -> Result<DriveQueueSnapshot> {
+    queue::clear_finished(app)
 }
 
 pub async fn download_file(

@@ -188,3 +188,22 @@
     grid-template-columns: 1fr;
   }
 }
+
+
+/* v0.7.0 persistent upload queue */
+.queue-toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+.queue-summary { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.queue-summary.paused { border-color: #d9a441; background: rgba(217, 164, 65, 0.08); }
+.queue-summary div { display: flex; flex-direction: column; gap: 3px; }
+.queue-summary span, .queue-summary small { color: var(--muted); }
+.queue-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 26px; }
+.queue-item { display: grid; grid-template-columns: 28px minmax(240px, 1fr) 130px 72px 76px auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.queue-item.running { border-color: rgba(35, 131, 226, 0.45); }
+.queue-item.failed { border-color: rgba(235, 87, 87, 0.45); }
+.queue-copy { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.queue-copy strong, .queue-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-copy span, .queue-size, .queue-attempts { color: var(--muted); font-size: 12px; }
+.queue-actions { display: flex; gap: 6px; }
+.queue-actions button { padding: 6px 8px; font-size: 12px; }
+.transfer-history-heading { margin-top: 10px; }
+@media (max-width: 980px) { .queue-item { grid-template-columns: 24px 1fr auto; } .queue-size, .queue-attempts { display: none; } .queue-actions { grid-column: 2 / -1; } .queue-summary { align-items: flex-start; flex-direction: column; } }

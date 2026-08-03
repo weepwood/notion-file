@@ -305,7 +305,7 @@ pub(super) async fn upload_file(
         .essence_str()
         .to_string();
     let size = metadata.len();
-    let node_id = new_id("node");
+    let node_id = request.node_id.clone().unwrap_or_else(|| new_id("node"));
     let now = Utc::now().to_rfc3339();
     let mut transfer = DriveTransfer {
         id: new_id("upload"),
@@ -996,6 +996,17 @@ pub(super) fn emit_progress_detailed(
     total_bytes: u64,
     details: ProgressDetails,
 ) {
+    if transfer.direction == "upload" {
+        if let Some(node_id) = transfer.node_id.as_deref() {
+            super::queue::persist_progress(
+                app,
+                node_id,
+                &details.stage_code,
+                transferred_bytes,
+                total_bytes,
+            );
+        }
+    }
     let _ = app.emit(
         "drive-transfer-progress",
         DriveTransferProgress {

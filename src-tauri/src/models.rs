@@ -225,6 +225,46 @@ pub struct DriveTransfer {
 pub struct DriveUploadRequest {
     pub file_path: String,
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveQueueEnqueueRequest {
+    pub file_paths: Vec<String>,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveQueueJob {
+    pub id: String,
+    pub node_id: String,
+    pub parent_id: Option<String>,
+    pub file_path: String,
+    pub file_name: String,
+    pub size: u64,
+    pub status: String,
+    pub stage: String,
+    pub transferred_bytes: u64,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveQueueSnapshot {
+    pub paused: bool,
+    pub worker_running: bool,
+    pub running_job_id: Option<String>,
+    pub pending_count: usize,
+    pub failed_count: usize,
+    pub jobs: Vec<DriveQueueJob>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

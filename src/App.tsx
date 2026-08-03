@@ -23,6 +23,8 @@ import {
   ListChecks,
   LoaderCircle,
   Move,
+  Pause,
+  Play,
   Pencil,
   Plus,
   RefreshCw,
@@ -38,6 +40,8 @@ import type {
   DriveFolderDownloadResult,
   DriveInitResult,
   DriveNode,
+  DriveQueueJob,
+  DriveQueueSnapshot,
   DriveTransfer,
   DriveTransferProgress,
   DriveVersion,
@@ -58,6 +62,14 @@ const DEFAULT_CONFIG: AppConfig = {
 };
 
 type Notice = { type: "success" | "error" | "info"; text: string };
+
+const EMPTY_QUEUE: DriveQueueSnapshot = {
+  paused: false,
+  workerRunning: false,
+  pendingCount: 0,
+  failedCount: 0,
+  jobs: [],
+};
 
 function formatBytes(bytes: number): string {
   if (!bytes) return "0 B";
@@ -108,6 +120,16 @@ function transferLabel(status: DriveTransfer["status"]): string {
   }[status];
 }
 
+function queueStatusLabel(status: DriveQueueJob["status"]): string {
+  return {
+    pending: "等待中",
+    running: "上传中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  }[status];
+}
+
 function versionDownloadName(fileName: string, version: number): string {
   const index = fileName.lastIndexOf(".");
   if (index <= 0) return `${fileName}.v${version}`;
@@ -121,6 +143,7 @@ export default function App() {
   const [hasToken, setHasToken] = useState(false);
   const [nodes, setNodes] = useState<DriveNode[]>([]);
   const [transfers, setTransfers] = useState<DriveTransfer[]>([]);
+  const [uploadQueue, setUploadQueue] = useState<DriveQueueSnapshot>(EMPTY_QUEUE);
   const [versions, setVersions] = useState<DriveVersion[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -144,11 +167,36 @@ export default function App() {
 
   useEffect(() => {
     void loadLocalData();
-    const unlisten = listen<DriveTransferProgress>("drive-transfer-progress", (event) => {
+    const progressListener = listen<DriveTransferProgress>("drive-transfer-progress", (event) => {
       setProgress(event.payload);
+      if (event.payload.nodeId) {
+        setUploadQueue((current) => ({
+          ...current,
+          jobs: current.jobs.map((job) =>
+            job.nodeId === event.payload.nodeId
+              ? {
+                  ...job,
+                  stage: event.payload.stageCode || event.payload.stage,
+                  transferredBytes: event.payload.transferredBytes,
+                  size: Math.max(job.size, event.payload.totalBytes),
+                  status: "running",
+                }
+              : job,
+          ),
+        }));
+      }
+    });
+    const queueListener = listen<DriveQueueSnapshot>("drive-queue-changed", (event) => {
+      setUploadQueue(event.payload);
+      void refreshLocal();
+    });
+    const errorListener = listen<string>("drive-queue-error", (event) => {
+      setNotice({ type: "error", text: `上传队列异常：${event.payload}` });
     });
     return () => {
-      void unlisten.then((dispose) => dispose());
+      void progressListener.then((dispose) => dispose());
+      void queueListener.then((dispose) => dispose());
+      void errorListener.then((dispose) => dispose());
     };
   }, []);
 
@@ -164,30 +212,34 @@ export default function App() {
 
   async function loadLocalData() {
     try {
-      const [saved, savedToken, savedNodes, savedTransfers] = await Promise.all([
+      const [saved, savedToken, savedNodes, savedTransfers, savedQueue] = await Promise.all([
         invoke<AppConfig>("get_saved_config"),
         invoke<boolean>("has_saved_token"),
         invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }).catch(() => []),
         invoke<DriveTransfer[]>("get_drive_transfers").catch(() => []),
+        invoke<DriveQueueSnapshot>("get_drive_upload_queue").catch(() => EMPTY_QUEUE),
       ]);
       setConfig({ ...DEFAULT_CONFIG, ...saved });
       setHasToken(savedToken);
       setNodes(savedNodes);
       setTransfers(savedTransfers);
+      setUploadQueue(savedQueue);
     } catch (error) {
       setNotice({ type: "error", text: String(error) });
     }
   }
 
   async function refreshLocal() {
-    const [savedNodes, savedTransfers, savedConfig] = await Promise.all([
+    const [savedNodes, savedTransfers, savedConfig, savedQueue] = await Promise.all([
       invoke<DriveNode[]>("get_drive_nodes", { includeTrashed: true }),
       invoke<DriveTransfer[]>("get_drive_transfers"),
       invoke<AppConfig>("get_saved_config"),
+      invoke<DriveQueueSnapshot>("get_drive_upload_queue").catch(() => EMPTY_QUEUE),
     ]);
     setNodes(savedNodes);
     setTransfers(savedTransfers);
     setConfig({ ...DEFAULT_CONFIG, ...savedConfig });
+    setUploadQueue(savedQueue);
   }
 
   async function refreshVersions(nodeId: string) {
@@ -313,28 +365,19 @@ export default function App() {
     });
     const paths = Array.isArray(chosen) ? chosen : typeof chosen === "string" ? [chosen] : [];
     if (!paths.length) return;
-
-    setBusy("upload");
-    let succeeded = 0;
-    const failures: string[] = [];
-    for (const path of paths) {
-      try {
-        await invoke<DriveNode>("upload_drive_file", {
-          request: { filePath: path, parentId: folderId },
-        });
-        succeeded += 1;
-      } catch (error) {
-        failures.push(`${localName(path)}：${String(error)}`);
-      }
-      await refreshLocal();
+    try {
+      const next = await invoke<DriveQueueSnapshot>("enqueue_drive_uploads", {
+        request: { filePaths: paths, parentId: folderId },
+      });
+      setUploadQueue(next);
+      setView("transfers");
+      setNotice({
+        type: "success",
+        text: `已将 ${paths.length} 个文件写入持久化队列，切换页面或重启应用后任务仍会保留。`,
+      });
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
     }
-    setBusy(null);
-    setProgress(null);
-    setNotice(
-      failures.length
-        ? { type: "error", text: `成功 ${succeeded}，失败 ${failures.length}。${failures[0]}` }
-        : { type: "success", text: `${succeeded} 个文件已上传。` },
-    );
   }
 
   async function downloadSelected() {
@@ -537,6 +580,50 @@ export default function App() {
     }
   }
 
+  async function setQueuePaused(paused: boolean) {
+    try {
+      const next = await invoke<DriveQueueSnapshot>(
+        paused ? "pause_drive_upload_queue" : "resume_drive_upload_queue",
+      );
+      setUploadQueue(next);
+      setNotice({
+        type: "info",
+        text: paused
+          ? "上传队列已暂停；当前正在发送的文件会完成，之后不再启动新任务。"
+          : "上传队列已继续执行。",
+      });
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
+    }
+  }
+
+  async function retryQueueJob(jobId: string) {
+    try {
+      const next = await invoke<DriveQueueSnapshot>("retry_drive_upload_job", { jobId });
+      setUploadQueue(next);
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
+    }
+  }
+
+  async function cancelQueueJob(jobId: string) {
+    try {
+      const next = await invoke<DriveQueueSnapshot>("cancel_drive_upload_job", { jobId });
+      setUploadQueue(next);
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
+    }
+  }
+
+  async function clearFinishedQueue() {
+    try {
+      const next = await invoke<DriveQueueSnapshot>("clear_finished_drive_upload_queue");
+      setUploadQueue(next);
+    } catch (error) {
+      setNotice({ type: "error", text: String(error) });
+    }
+  }
+
   async function clearTransfers() {
     try {
       const count = await invoke<number>("clear_finished_drive_transfers");
@@ -627,6 +714,61 @@ export default function App() {
     }
   }
 
+  function renderQueueJob(job: DriveQueueJob) {
+    const percent = job.size
+      ? Math.min(100, Math.round((job.transferredBytes / job.size) * 100))
+      : 0;
+    return (
+      <div className={`queue-item ${job.status}`} key={job.id}>
+        <i><Upload size={17} /></i>
+        <div className="queue-copy">
+          <strong>{job.fileName}</strong>
+          <span>{job.lastError ?? job.filePath}</span>
+          <div className="mini-progress"><div style={{ width: `${percent}%` }} /></div>
+        </div>
+        <div className="queue-size">{formatBytes(job.transferredBytes)} / {formatBytes(job.size)}</div>
+        <div className="queue-attempts">尝试 {job.attempts}</div>
+        <em className={`transfer-status ${job.status}`}>{queueStatusLabel(job.status)}</em>
+        <div className="queue-actions">
+          {(job.status === "failed" || job.status === "cancelled") && (
+            <button onClick={() => retryQueueJob(job.id)}><RefreshCw size={12} />重试</button>
+          )}
+          {(job.status === "pending" || job.status === "failed") && (
+            <button onClick={() => cancelQueueJob(job.id)}><X size={12} />取消</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderTransferHistory(transfer: DriveTransfer) {
+    const percent = transfer.totalBytes
+      ? Math.min(100, Math.round((transfer.transferredBytes / transfer.totalBytes) * 100))
+      : 0;
+    const resumable =
+      transfer.direction === "download" &&
+      transfer.status === "failed" &&
+      Boolean(transfer.localPath) &&
+      Boolean(transfer.nodeId);
+    return (
+      <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}>
+        <i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i>
+        <div className="transfer-copy">
+          <strong>{transfer.fileName}</strong>
+          <span>{transfer.message ?? transfer.localPath ?? ""}</span>
+          <div className="mini-progress"><div style={{ width: `${percent}%` }} /></div>
+        </div>
+        <div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div>
+        <em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>
+        {resumable && (
+          <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}>
+            <RefreshCw size={12} />续传
+          </button>
+        )}
+      </div>
+    );
+  }
+
   const progressPercent = progress?.totalBytes
     ? Math.min(100, Math.round((progress.transferredBytes / progress.totalBytes) * 100))
     : 0;
@@ -636,7 +778,7 @@ export default function App() {
       <aside className="drive-sidebar">
         <div className="brand">
           <div className="brand-icon"><Cloud size={22} /></div>
-          <div><strong>Notion File</strong><span>个人云盘 · v0.6.1</span></div>
+          <div><strong>Notion File</strong><span>个人云盘 · v0.7.0</span></div>
         </div>
         <nav>
           <button className={view === "drive" ? "active" : ""} onClick={() => setView("drive")}><HardDrive size={17} />我的云盘</button>
@@ -653,12 +795,12 @@ export default function App() {
       <main className="drive-main">
         <header className="drive-topbar">
           <div><strong>{view === "drive" ? (showTrash ? "回收站" : "我的云盘") : view === "transfers" ? "传输中心" : view === "legacy" ? "传统上传与同步" : "连接设置"}</strong><span>{driveReady ? `Data Source ${config.driveDataSourceId.slice(0, 8)}…` : "使用 Notion 保存远端文件与索引"}</span></div>
-          {busy && <div className="busy-label"><LoaderCircle size={15} className="spin" />正在处理</div>}
+          {(busy || uploadQueue.workerRunning) && <div className="busy-label"><LoaderCircle size={15} className="spin" />{busy ? "正在处理" : "后台上传中"}</div>}
         </header>
 
         <div className="drive-content">
           {notice && <div className={`notice ${notice.type}`}>{notice.type === "error" ? <AlertCircle size={18} /> : notice.type === "success" ? <CheckCircle2 size={18} /> : <Cloud size={18} />}<span>{notice.text}</span><button onClick={() => setNotice(null)}><X size={15} /></button></div>}
-          {progress && busy && <div className="transfer-banner diagnostic-banner">
+          {progress && (busy || uploadQueue.workerRunning) && <div className="transfer-banner diagnostic-banner">
             <div className="diagnostic-title"><div>{progress.direction === "upload" ? <Upload size={18} /> : <Download size={18} />}<span><strong>{progress.fileName}</strong><small>{progress.stage}</small></span></div><div className="progress-meta">{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</div></div>
             <div className="progress-track"><div style={{ width: `${progressPercent}%` }} /></div>
             {progress.direction === "upload" && <>
@@ -688,9 +830,58 @@ export default function App() {
             </section>
           )}
 
-          {view === "transfers" && <section><div className="section-heading"><div><h1>传输中心</h1><p>上传记录会保留平均速度、各阶段耗时和目标网址；下载失败会保留 .part 临时文件。</p></div><button onClick={clearTransfers}><Trash2 size={15} />清理已结束记录</button></div><div className="transfer-list">{transfers.length === 0 ? <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div> : transfers.map((transfer) => { const percent = transfer.totalBytes ? Math.min(100, Math.round(transfer.transferredBytes / transfer.totalBytes * 100)) : 0; const resumable = transfer.direction === "download" && transfer.status === "failed" && Boolean(transfer.localPath) && Boolean(transfer.nodeId); return <div className={`transfer-item ${resumable ? "has-action" : ""}`} key={transfer.id}><i>{transfer.direction === "upload" ? <Upload size={17} /> : <Download size={17} />}</i><div className="transfer-copy"><strong>{transfer.fileName}</strong><span>{transfer.message ?? transfer.localPath ?? ""}</span><div className="mini-progress"><div style={{ width: `${percent}%` }} /></div></div><div className="transfer-size">{formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.totalBytes)}</div><em className={`transfer-status ${transfer.status}`}>{transferLabel(transfer.status)}</em>{resumable && <button className="transfer-retry" onClick={() => retryTransfer(transfer)} disabled={Boolean(busy)}><RefreshCw size={12} />续传</button>}</div>; })}</div></section>}
+          {view === "transfers" && (
+            <section>
+              <div className="section-heading">
+                <div>
+                  <h1>传输中心</h1>
+                  <p>上传任务写入 SQLite 后由 Rust 后台顺序执行，应用重启会自动恢复未完成任务。</p>
+                </div>
+                <div className="queue-toolbar">
+                  <button
+                    onClick={() => setQueuePaused(uploadQueue.workerRunning && !uploadQueue.paused)}
+                  >
+                    {uploadQueue.paused || (!uploadQueue.workerRunning && uploadQueue.pendingCount > 0)
+                      ? <Play size={15} />
+                      : <Pause size={15} />}
+                    {uploadQueue.paused
+                      ? "继续队列"
+                      : !uploadQueue.workerRunning && uploadQueue.pendingCount > 0
+                        ? "启动队列"
+                        : "暂停队列"}
+                  </button>
+                  <button onClick={clearFinishedQueue}><Trash2 size={15} />清理已完成队列</button>
+                  <button onClick={clearTransfers}><Trash2 size={15} />清理传输记录</button>
+                </div>
+              </div>
+              <div className={`queue-summary ${uploadQueue.paused ? "paused" : ""}`}>
+                <div>
+                  <strong>{uploadQueue.paused ? "队列已暂停" : uploadQueue.workerRunning ? "队列执行中" : "队列空闲"}</strong>
+                  <span>等待 {uploadQueue.pendingCount} · 失败 {uploadQueue.failedCount}</span>
+                </div>
+                <small>暂停会在当前文件结束后生效；正在发送的 HTTP 请求不会被强行中断。</small>
+              </div>
+              <div className="queue-list">
+                {uploadQueue.jobs.length === 0 ? (
+                  <div className="empty-state"><Upload size={36} /><strong>暂无持久化上传任务</strong></div>
+                ) : (
+                  uploadQueue.jobs.map(renderQueueJob)
+                )}
+              </div>
+              <div className="section-heading transfer-history-heading">
+                <div><h2>传输历史</h2><p>下载失败会保留 .part 临时文件，可从已完成字节继续。</p></div>
+              </div>
+              <div className="transfer-list">
+                {transfers.length === 0 ? (
+                  <div className="empty-state"><History size={36} /><strong>暂无传输记录</strong></div>
+                ) : (
+                  transfers.map(renderTransferHistory)
+                )}
+              </div>
+            </section>
+          )}
 
-          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect}>断开本机索引</button>}</div></div></section>}
+          {view === "settings" && <section className="settings-page"><div className="section-heading"><div><h1>连接设置</h1><p>新建云盘需要共享父页面；连接已有 Database/Data Source 时可以不填写父页面。</p></div></div><div className="settings-card"><label><span><KeyRound size={16} />Notion Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={hasToken ? "Token 已保存，留空表示不修改" : "secret_... 或 ntn_..."} /></label><label><span><Link size={16} />父页面链接或 ID</span><input value={config.rootPageId} onChange={(event) => setConfig({ ...config, rootPageId: event.target.value })} placeholder="新建云盘时填写" /></label><details><summary>连接已有云盘数据库</summary><label><span><Database size={16} />Database ID</span><input value={config.driveDatabaseId} onChange={(event) => setConfig({ ...config, driveDatabaseId: event.target.value })} /></label><label><span><Database size={16} />Data Source ID</span><input value={config.driveDataSourceId} onChange={(event) => setConfig({ ...config, driveDataSourceId: event.target.value })} /></label></details><div className="settings-actions"><button onClick={saveSettings} disabled={!credentialsReady || Boolean(busy)}>保存设置</button><button className="primary" onClick={initializeDrive} disabled={!canInitialize || Boolean(busy)}>{busy === "initialize" ? <LoaderCircle size={15} className="spin" /> : <Cloud size={15} />}初始化或连接云盘</button>{driveReady && <button className="danger" onClick={disconnect} disabled={uploadQueue.workerRunning}>断开本机索引</button>}</div></div></section>}
 
           {view === "legacy" && <section><div className="section-heading"><div><h1>传统上传与文件夹转文档</h1><p>保留 v0.4.0 的单文件页面和本地文件夹转 Notion 文档能力。</p></div></div><div className="legacy-grid"><div className="legacy-card"><h2>单文件上传</h2><p>{legacyFile || "选择文件后创建同名 Notion 页面。"}</p><div><button onClick={chooseLegacyFile}><FileText size={15} />选择文件</button><button className="primary" onClick={uploadLegacyFile} disabled={!legacyFile || Boolean(busy)}><Upload size={15} />上传</button></div></div><div className="legacy-card"><h2>文件夹转文档</h2><p>{config.folderPath || "选择本地文件夹，扫描并整理为一篇 Notion 文档。"}</p><div><button onClick={chooseLegacyFolder}><FolderOpen size={15} />选择并扫描</button><button className="primary" onClick={syncLegacyFolder} disabled={!legacyScan || Boolean(busy)}><FolderSync size={15} />开始同步</button></div>{legacyScan && <small>扫描 {legacyScan.files.length} 个文件，变化 {legacyScan.changedCount} 个，共 {formatBytes(legacyScan.totalBytes)}</small>}{legacyResult?.pageUrl && <button onClick={() => window.open(legacyResult.pageUrl, "_blank")}><ExternalLink size={14} />打开同步文档</button>}</div></div></section>}
         </div>

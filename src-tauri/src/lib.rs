@@ -12,7 +12,8 @@ mod uploader;
 
 use models::{
     AppConfig, DriveDownloadRequest, DriveFolderDownloadRequest, DriveFolderDownloadResult,
-    DriveInitResult, DriveNode, DriveTransfer, DriveUploadRequest, DriveVersion,
+    DriveInitResult, DriveNode, DriveQueueEnqueueRequest, DriveQueueSnapshot, DriveTransfer,
+    DriveUploadRequest, DriveVersion,
     DriveVersionDownloadRequest, DriveVersionUploadRequest, FfmpegStatus, ScanResult,
     SingleUploadRequest, SyncRequest, SyncResult, UploadRecord,
 };
@@ -29,8 +30,10 @@ fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_notion_token(token: String) -> Result<(), String> {
-    storage::save_token(&token).map_err(|error| error.to_string())
+fn save_notion_token(app: AppHandle, token: String) -> Result<(), String> {
+    storage::save_token(&token).map_err(|error| error.to_string())?;
+    drive::start_queue_if_ready(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -159,6 +162,50 @@ async fn upload_drive_file(
 }
 
 #[tauri::command]
+fn get_drive_upload_queue(app: AppHandle) -> Result<DriveQueueSnapshot, String> {
+    drive::queue_snapshot(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn enqueue_drive_uploads(
+    app: AppHandle,
+    request: DriveQueueEnqueueRequest,
+) -> Result<DriveQueueSnapshot, String> {
+    drive::enqueue_uploads(&app, request).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pause_drive_upload_queue(app: AppHandle) -> Result<DriveQueueSnapshot, String> {
+    drive::pause_queue(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resume_drive_upload_queue(app: AppHandle) -> Result<DriveQueueSnapshot, String> {
+    drive::resume_queue(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn retry_drive_upload_job(
+    app: AppHandle,
+    job_id: String,
+) -> Result<DriveQueueSnapshot, String> {
+    drive::retry_queue_job(&app, job_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_drive_upload_job(
+    app: AppHandle,
+    job_id: String,
+) -> Result<DriveQueueSnapshot, String> {
+    drive::cancel_queue_job(&app, job_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn clear_finished_drive_upload_queue(app: AppHandle) -> Result<DriveQueueSnapshot, String> {
+    drive::clear_finished_queue(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn download_drive_file(
     app: AppHandle,
     request: DriveDownloadRequest,
@@ -265,6 +312,12 @@ fn disconnect_drive(app: AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            if let Err(error) = drive::recover_queue(app.handle().clone()) {
+                eprintln!("恢复持久化上传队列失败：{error}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_saved_config,
             save_config,
@@ -282,6 +335,13 @@ pub fn run() {
             get_drive_nodes,
             create_drive_folder,
             upload_drive_file,
+            get_drive_upload_queue,
+            enqueue_drive_uploads,
+            pause_drive_upload_queue,
+            resume_drive_upload_queue,
+            retry_drive_upload_job,
+            cancel_drive_upload_job,
+            clear_finished_drive_upload_queue,
             download_drive_file,
             download_drive_folder,
             get_drive_versions,
