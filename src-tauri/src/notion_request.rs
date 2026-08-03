@@ -28,6 +28,15 @@ struct RateLimiter {
     next_allowed: Mutex<Instant>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryPolicy {
+    /// GET、HEAD、OPTIONS、DELETE 等可安全重复执行的请求。
+    Idempotent,
+    /// POST、PATCH、文件上传等写请求。只在明确未执行的情况下重试，
+    /// 避免响应丢失后重复创建页面或重复追加块。
+    RateLimitOnly,
+}
+
 static GLOBAL_LIMITER: OnceLock<Arc<RateLimiter>> = OnceLock::new();
 
 impl NotionHttp {
@@ -35,6 +44,7 @@ impl NotionHttp {
         let client = Client::builder()
             .user_agent("notion-file/0.3.0")
             .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(600))
             .build()
             .context("无法初始化 Notion HTTP 客户端")?;
         Ok(Self {
@@ -66,21 +76,24 @@ impl NotionHttp {
         let client = self.client.clone();
         let token = self.token.clone();
 
-        execute_with_retry(move || {
-            let file = multipart::Part::bytes(bytes.clone())
-                .file_name(file_name.clone())
-                .mime_str(&mime_type)?;
-            let mut form = multipart::Form::new().part("file", file);
-            if let Some(part_number) = part_number {
-                form = form.text("part_number", part_number.to_string());
-            }
-            Ok(client
-                .post(&url)
-                .bearer_auth(token.as_ref())
-                .header("Notion-Version", NOTION_VERSION)
-                .header("Accept", "application/json")
-                .multipart(form))
-        })
+        execute_with_retry(
+            move || {
+                let file = multipart::Part::bytes(bytes.clone())
+                    .file_name(file_name.clone())
+                    .mime_str(&mime_type)?;
+                let mut form = multipart::Form::new().part("file", file);
+                if let Some(part_number) = part_number {
+                    form = form.text("part_number", part_number.to_string());
+                }
+                Ok(client
+                    .post(&url)
+                    .bearer_auth(token.as_ref())
+                    .header("Notion-Version", NOTION_VERSION)
+                    .header("Accept", "application/json")
+                    .multipart(form))
+            },
+            RetryPolicy::RateLimitOnly,
+        )
         .await
     }
 }
@@ -95,20 +108,24 @@ impl NotionRequest {
         let client = self.http.client.clone();
         let token = self.http.token.clone();
         let method = self.method;
+        let retry_policy = retry_policy_for_method(&method);
         let url = self.url;
         let json_body = self.json_body;
 
-        execute_with_retry(move || {
-            let mut builder = client
-                .request(method.clone(), &url)
-                .bearer_auth(token.as_ref())
-                .header("Notion-Version", NOTION_VERSION)
-                .header("Accept", "application/json");
-            if let Some(body) = json_body.as_ref() {
-                builder = builder.json(body);
-            }
-            Ok(builder)
-        })
+        execute_with_retry(
+            move || {
+                let mut builder = client
+                    .request(method.clone(), &url)
+                    .bearer_auth(token.as_ref())
+                    .header("Notion-Version", NOTION_VERSION)
+                    .header("Accept", "application/json");
+                if let Some(body) = json_body.as_ref() {
+                    builder = builder.json(body);
+                }
+                Ok(builder)
+            },
+            retry_policy,
+        )
         .await
     }
 }
@@ -150,7 +167,7 @@ pub async fn parse_json_response(response: Response, context: &str) -> Result<Va
     serde_json::from_str(&text).with_context(|| format!("{context}返回了无效 JSON"))
 }
 
-async fn execute_with_retry<F>(factory: F) -> Result<Response>
+async fn execute_with_retry<F>(factory: F, retry_policy: RetryPolicy) -> Result<Response>
 where
     F: Fn() -> Result<RequestBuilder>,
 {
@@ -162,7 +179,9 @@ where
 
         match builder.send().await {
             Ok(response) => {
-                if !is_retryable_status(response.status()) || attempt + 1 == MAX_ATTEMPTS {
+                if !should_retry_status(response.status(), retry_policy)
+                    || attempt + 1 == MAX_ATTEMPTS
+                {
                     return Ok(response);
                 }
 
@@ -170,6 +189,12 @@ where
                 sleep(delay).await;
             }
             Err(error) => {
+                let can_retry = retry_policy == RetryPolicy::Idempotent || error.is_connect();
+                if !can_retry {
+                    return Err(error).context(
+                        "Notion 写请求发生网络错误；为避免重复创建页面或重复写入，未自动重试",
+                    );
+                }
                 if attempt + 1 == MAX_ATTEMPTS {
                     return Err(error).context("Notion API 网络请求失败，已达到最大重试次数");
                 }
@@ -208,15 +233,30 @@ fn limiter() -> &'static Arc<RateLimiter> {
     })
 }
 
-fn is_retryable_status(status: StatusCode) -> bool {
+fn retry_policy_for_method(method: &Method) -> RetryPolicy {
+    if matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::DELETE
+    ) {
+        RetryPolicy::Idempotent
+    } else {
+        RetryPolicy::RateLimitOnly
+    }
+}
+
+fn should_retry_status(status: StatusCode, retry_policy: RetryPolicy) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS
-        || matches!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-        )
+        || (retry_policy == RetryPolicy::Idempotent && is_transient_server_status(status))
+}
+
+fn is_transient_server_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 fn retry_delay(response: &Response, attempt: usize) -> Duration {
@@ -240,16 +280,52 @@ fn exponential_backoff(attempt: usize) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{exponential_backoff, is_retryable_status};
-    use reqwest::StatusCode;
+    use super::{
+        exponential_backoff, retry_policy_for_method, should_retry_status, RetryPolicy,
+    };
+    use reqwest::{Method, StatusCode};
     use std::time::Duration;
 
     #[test]
-    fn retries_only_transient_statuses() {
-        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
-        assert!(!is_retryable_status(StatusCode::FORBIDDEN));
+    fn classifies_request_idempotency() {
+        assert_eq!(retry_policy_for_method(&Method::GET), RetryPolicy::Idempotent);
+        assert_eq!(retry_policy_for_method(&Method::DELETE), RetryPolicy::Idempotent);
+        assert_eq!(
+            retry_policy_for_method(&Method::POST),
+            RetryPolicy::RateLimitOnly
+        );
+        assert_eq!(
+            retry_policy_for_method(&Method::PATCH),
+            RetryPolicy::RateLimitOnly
+        );
+    }
+
+    #[test]
+    fn retries_rate_limits_for_all_requests() {
+        assert!(should_retry_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            RetryPolicy::Idempotent
+        ));
+        assert!(should_retry_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            RetryPolicy::RateLimitOnly
+        ));
+    }
+
+    #[test]
+    fn retries_server_errors_only_for_idempotent_requests() {
+        assert!(should_retry_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            RetryPolicy::Idempotent
+        ));
+        assert!(!should_retry_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            RetryPolicy::RateLimitOnly
+        ));
+        assert!(!should_retry_status(
+            StatusCode::BAD_REQUEST,
+            RetryPolicy::Idempotent
+        ));
     }
 
     #[test]
