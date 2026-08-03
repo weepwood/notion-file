@@ -3,10 +3,11 @@ use crate::models::{SingleUploadRequest, UploadProgress, UploadRecord};
 use crate::notion::{
     divider_block, heading_block, metadata_callout, text_blocks, CreatedPage, NotionClient,
 };
+use crate::notion_request::{parse_json_response, NotionHttp};
 use crate::storage;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use reqwest::{multipart, Client, Response};
+use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,6 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncReadExt;
 
 const NOTION_BASE_URL: &str = "https://api.notion.com/v1";
-const NOTION_VERSION: &str = "2026-03-11";
 const TEXT_EXTENSIONS: &[&str] = &[
     "md", "markdown", "mdx", "txt", "log", "json", "jsonc", "yaml", "yml", "toml", "xml",
     "html", "css", "scss", "less", "js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "kt",
@@ -280,6 +280,7 @@ async fn upload_assets_to_notion(
 ) -> Result<CreatedPage> {
     let token = storage::load_token()?;
     let notion = NotionClient::new(token.clone())?;
+    let upload_http = NotionHttp::new(token)?;
     if !root_page_id.trim().is_empty() {
         notion
             .get_page_title(root_page_id)
@@ -291,11 +292,6 @@ async fn upload_assets_to_notion(
         .create_document_page(parent_page_id(root_page_id), page_title)
         .await
         .map_err(|error| create_page_error(root_page_id, error))?;
-
-    let upload_client = Client::builder()
-        .user_agent("notion-file/0.3.0")
-        .build()
-        .context("无法初始化文件上传客户端")?;
 
     let write_result = async {
         let mut blocks = vec![metadata_callout(
@@ -319,8 +315,7 @@ async fn upload_assets_to_notion(
             );
             let upload_id = upload_asset(
                 app,
-                &upload_client,
-                &token,
+                &upload_http,
                 asset,
                 index + 1,
                 assets.len(),
@@ -379,23 +374,21 @@ async fn append_text_preview(blocks: &mut Vec<Value>, asset: &UploadAsset) {
 
 async fn upload_asset(
     app: &AppHandle,
-    client: &Client,
-    token: &str,
+    http: &NotionHttp,
     asset: &UploadAsset,
     asset_number: usize,
     asset_total: usize,
 ) -> Result<String> {
     if asset.size <= MAX_SINGLE_PART_SIZE {
-        upload_single_part(client, token, asset).await
+        upload_single_part(http, asset).await
     } else {
-        upload_multi_part(app, client, token, asset, asset_number, asset_total).await
+        upload_multi_part(app, http, asset, asset_number, asset_total).await
     }
 }
 
-async fn upload_single_part(client: &Client, token: &str, asset: &UploadAsset) -> Result<String> {
+async fn upload_single_part(http: &NotionHttp, asset: &UploadAsset) -> Result<String> {
     let created = create_upload(
-        client,
-        token,
+        http,
         json!({
             "mode": "single_part",
             "filename": asset.file_name,
@@ -409,17 +402,16 @@ async fn upload_single_part(client: &Client, token: &str, asset: &UploadAsset) -
     let bytes = tokio::fs::read(&asset.path)
         .await
         .context("无法读取待上传文件")?;
-    let part = multipart::Part::bytes(bytes)
-        .file_name(asset.file_name.clone())
-        .mime_str(&asset.mime_type)?;
-    let uploaded = parse_response(
-        client
-            .post(upload_url)
-            .bearer_auth(token)
-            .header("Notion-Version", NOTION_VERSION)
-            .multipart(multipart::Form::new().part("file", part))
-            .send()
-            .await?,
+    let uploaded = parse_json_response(
+        http.send_multipart(
+            upload_url,
+            &asset.file_name,
+            &asset.mime_type,
+            bytes,
+            None,
+        )
+        .await?,
+        "Notion 文件上传请求",
     )
     .await?;
 
@@ -429,16 +421,14 @@ async fn upload_single_part(client: &Client, token: &str, asset: &UploadAsset) -
 
 async fn upload_multi_part(
     app: &AppHandle,
-    client: &Client,
-    token: &str,
+    http: &NotionHttp,
     asset: &UploadAsset,
     asset_number: usize,
     asset_total: usize,
 ) -> Result<String> {
     let number_of_parts = part_count(asset.size);
     let created = create_upload(
-        client,
-        token,
+        http,
         json!({
             "mode": "multi_part",
             "number_of_parts": number_of_parts,
@@ -467,24 +457,19 @@ async fn upload_multi_part(
             .await
             .with_context(|| format!("读取第 {part_number}/{number_of_parts} 个 API 分片失败"))?;
 
-        let part = multipart::Part::bytes(bytes)
-            .file_name(asset.file_name.clone())
-            .mime_str(&asset.mime_type)?;
-        parse_response(
-            client
-                .post(&upload_url)
-                .bearer_auth(token)
-                .header("Notion-Version", NOTION_VERSION)
-                .multipart(
-                    multipart::Form::new()
-                        .text("part_number", part_number.to_string())
-                        .part("file", part),
-                )
-                .send()
-                .await
-                .with_context(|| {
-                    format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
-                })?,
+        parse_json_response(
+            http.send_multipart(
+                upload_url.clone(),
+                &asset.file_name,
+                &asset.mime_type,
+                bytes,
+                Some(part_number),
+            )
+            .await
+            .with_context(|| {
+                format!("发送第 {part_number}/{number_of_parts} 个 API 分片失败")
+            })?,
+            "Notion 文件分片上传请求",
         )
         .await
         .with_context(|| {
@@ -503,15 +488,12 @@ async fn upload_multi_part(
         );
     }
 
-    let completed = parse_response(
-        client
-            .post(complete_url)
-            .bearer_auth(token)
-            .header("Notion-Version", NOTION_VERSION)
-            .header("Accept", "application/json")
+    let completed = parse_json_response(
+        http.request(Method::POST, complete_url)
             .send()
             .await
             .context("完成分片上传请求失败")?,
+        "完成 Notion 文件分片上传",
     )
     .await
     .context("Notion 无法完成分片上传")?;
@@ -520,35 +502,16 @@ async fn upload_multi_part(
     Ok(upload_id)
 }
 
-async fn create_upload(client: &Client, token: &str, body: Value) -> Result<Value> {
-    parse_response(
-        client
-            .post(format!("{NOTION_BASE_URL}/file_uploads"))
-            .bearer_auth(token)
-            .header("Notion-Version", NOTION_VERSION)
-            .header("Accept", "application/json")
+async fn create_upload(http: &NotionHttp, body: Value) -> Result<Value> {
+    parse_json_response(
+        http.request(Method::POST, format!("{NOTION_BASE_URL}/file_uploads"))
             .json(&body)
             .send()
             .await
             .context("创建 Notion 文件上传任务失败")?,
+        "创建 Notion 文件上传任务",
     )
     .await
-}
-
-async fn parse_response(response: Response) -> Result<Value> {
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| value.get("message").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or(text);
-        anyhow::bail!("Notion 文件上传请求失败（{}）：{}", status.as_u16(), message);
-    }
-    if text.trim().is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_str(&text).context("Notion 文件上传接口返回了无效 JSON")
 }
 
 fn upload_display_block(upload_id: &str, mime_type: &str, display_mode: &str) -> Value {
