@@ -83,3 +83,108 @@
   font-size: 10px;
   line-height: 1.55;
 }
+
+
+/* v0.6.1 upload diagnostics */
+.diagnostic-banner {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.diagnostic-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.diagnostic-title > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.diagnostic-title span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.diagnostic-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.diagnostic-metrics > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #e5e5e2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.diagnostic-metrics span,
+.endpoint-row > span {
+  color: var(--muted, #787774);
+  font-size: 11px;
+}
+
+.diagnostic-metrics strong {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.endpoint-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.endpoint-row code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(55, 53, 47, 0.06);
+  color: #4b5563;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostic-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: #7c5c00;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diagnostic-hint svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+@media (max-width: 760px) {
+  .diagnostic-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .endpoint-row {
+    grid-template-columns: 1fr;
+  }
+}

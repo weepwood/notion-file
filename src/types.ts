@@ -61,8 +61,18 @@ export interface DriveTransferProgress {
   direction: "upload" | "download";
   fileName: string;
   stage: string;
+  stageCode: "hashing" | "uploading" | "notion_index" | "deduplicated" | "completed" | "failed" | "upload" | "download";
   transferredBytes: number;
   totalBytes: number;
+  currentSpeedBytesPerSecond: number;
+  averageSpeedBytesPerSecond: number;
+  elapsedMs: number;
+  stageElapsedMs: number;
+  endpointUrl?: string;
+  endpointHost?: string;
+  currentPart?: number;
+  totalParts?: number;
+  diagnosticHint?: string;
 }
 
 export interface DriveVersion {

@@ -15,12 +15,262 @@ use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::{Client, Response, StatusCode};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 const TRANSFER_PERSIST_INTERVAL: u64 = 8 * 1024 * 1024;
+
+const LIVE_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+const SLOW_UPLOAD_THRESHOLD_BPS: f64 = 512.0 * 1024.0;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ProgressDetails {
+    pub stage_code: String,
+    pub current_speed_bytes_per_second: f64,
+    pub average_speed_bytes_per_second: f64,
+    pub elapsed_ms: u64,
+    pub stage_elapsed_ms: u64,
+    pub endpoint_url: Option<String>,
+    pub endpoint_host: Option<String>,
+    pub current_part: Option<u64>,
+    pub total_parts: Option<u64>,
+    pub diagnostic_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct UploadDiagnostics {
+    pub endpoint_url: Option<String>,
+    pub endpoint_host: Option<String>,
+    pub average_speed_bytes_per_second: f64,
+    pub processing_ms: u64,
+    pub network_ms: u64,
+    pub remote_api_ms: u64,
+    pub total_ms: u64,
+    pub reused_remote_file: bool,
+    pub diagnostic_hint: String,
+}
+
+#[derive(Debug)]
+struct UploadProgressState {
+    endpoint_url: Option<String>,
+    endpoint_host: Option<String>,
+    last_bytes: u64,
+    last_sample: Instant,
+    last_emit: Instant,
+    current_speed: f64,
+    average_speed: f64,
+    current_part: Option<u64>,
+    total_parts: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(super) struct UploadProgressReporter {
+    app: AppHandle,
+    transfer: DriveTransfer,
+    operation_started: Instant,
+    state: Arc<Mutex<UploadProgressState>>,
+}
+
+impl UploadProgressReporter {
+    pub(super) fn new(
+        app: &AppHandle,
+        transfer: &DriveTransfer,
+        operation_started: Instant,
+    ) -> Self {
+        Self {
+            app: app.clone(),
+            transfer: transfer.clone(),
+            operation_started,
+            state: Arc::new(Mutex::new(UploadProgressState {
+                endpoint_url: None,
+                endpoint_host: None,
+                last_bytes: 0,
+                last_sample: Instant::now(),
+                last_emit: Instant::now() - LIVE_PROGRESS_INTERVAL,
+                current_speed: 0.0,
+                average_speed: 0.0,
+                current_part: None,
+                total_parts: None,
+            })),
+        }
+    }
+
+    pub(super) fn report(&self, event: file_upload::FileUploadProgress) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if event.bytes_sent < state.last_bytes {
+            state.last_bytes = 0;
+            state.last_sample = now;
+        }
+        let sample_elapsed = now.duration_since(state.last_sample).as_secs_f64();
+        if sample_elapsed > 0.0 {
+            state.current_speed =
+                event.bytes_sent.saturating_sub(state.last_bytes) as f64 / sample_elapsed;
+        }
+        let upload_elapsed = (event.elapsed_ms as f64 / 1000.0).max(0.001);
+        state.average_speed = event.bytes_sent as f64 / upload_elapsed;
+        state.endpoint_url = Some(event.endpoint_url.clone());
+        state.endpoint_host = event.endpoint_host.clone();
+        state.current_part = Some(event.current_part);
+        state.total_parts = Some(event.total_parts);
+
+        let should_emit = now.duration_since(state.last_emit) >= LIVE_PROGRESS_INTERVAL
+            || event.bytes_sent >= event.total_bytes;
+        if !should_emit {
+            return;
+        }
+        state.last_bytes = event.bytes_sent;
+        state.last_sample = now;
+        state.last_emit = now;
+        let current_speed = state.current_speed;
+        let average_speed = state.average_speed;
+        let hint = if event.elapsed_ms >= 3_000
+            && average_speed > 0.0
+            && average_speed < SLOW_UPLOAD_THRESHOLD_BPS
+        {
+            Some("当前网络上传速度低于 512 KiB/s，瓶颈更可能在网络链路".to_string())
+        } else {
+            None
+        };
+        drop(state);
+
+        let stage = if event.total_parts > 1 {
+            format!(
+                "正在上传分片 {}/{} · {}",
+                event.current_part,
+                event.total_parts,
+                event.endpoint_host.as_deref().unwrap_or("Notion")
+            )
+        } else {
+            format!(
+                "正在上传 · {}",
+                event.endpoint_host.as_deref().unwrap_or("Notion")
+            )
+        };
+        emit_progress_detailed(
+            &self.app,
+            &self.transfer,
+            &stage,
+            event.bytes_sent,
+            event.total_bytes,
+            ProgressDetails {
+                stage_code: "uploading".to_string(),
+                current_speed_bytes_per_second: current_speed,
+                average_speed_bytes_per_second: average_speed,
+                elapsed_ms: self.operation_started.elapsed().as_millis() as u64,
+                stage_elapsed_ms: event.elapsed_ms,
+                endpoint_url: Some(event.endpoint_url),
+                endpoint_host: event.endpoint_host,
+                current_part: Some(event.current_part),
+                total_parts: Some(event.total_parts),
+                diagnostic_hint: hint,
+            },
+        );
+    }
+
+    pub(super) fn snapshot(&self) -> (Option<String>, Option<String>, f64) {
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            state.endpoint_url.clone(),
+            state.endpoint_host.clone(),
+            state.average_speed,
+        )
+    }
+}
+
+pub(super) fn diagnose_upload(
+    endpoint_url: Option<String>,
+    endpoint_host: Option<String>,
+    average_speed_bytes_per_second: f64,
+    processing_ms: u64,
+    network_ms: u64,
+    remote_api_ms: u64,
+    total_ms: u64,
+    reused_remote_file: bool,
+) -> UploadDiagnostics {
+    let diagnostic_hint = if reused_remote_file {
+        "命中 SHA-256 去重，没有重新传输文件内容；耗时主要来自本地校验和 Notion 索引写入"
+            .to_string()
+    } else if network_ms >= processing_ms.max(remote_api_ms)
+        && average_speed_bytes_per_second > 0.0
+        && average_speed_bytes_per_second < SLOW_UPLOAD_THRESHOLD_BPS
+    {
+        "瓶颈更可能是网络上传：平均速度低于 512 KiB/s".to_string()
+    } else if processing_ms > network_ms && processing_ms > remote_api_ms && processing_ms >= 2_000 {
+        "瓶颈更可能是本地磁盘读取或 SHA-256 计算".to_string()
+    } else if remote_api_ms > network_ms && remote_api_ms >= 2_000 {
+        "瓶颈更可能是 Notion API 响应、全局限流等待或远端索引写入".to_string()
+    } else if network_ms >= processing_ms.max(remote_api_ms) {
+        "耗时主要发生在文件上传阶段，网络速度处于可观察范围".to_string()
+    } else {
+        "未发现单一明显瓶颈，可结合各阶段耗时继续判断".to_string()
+    };
+    UploadDiagnostics {
+        endpoint_url,
+        endpoint_host,
+        average_speed_bytes_per_second,
+        processing_ms,
+        network_ms,
+        remote_api_ms,
+        total_ms,
+        reused_remote_file,
+        diagnostic_hint,
+    }
+}
+
+pub(super) fn upload_summary(diagnostics: &UploadDiagnostics) -> String {
+    let endpoint = diagnostics
+        .endpoint_url
+        .as_deref()
+        .or(diagnostics.endpoint_host.as_deref())
+        .unwrap_or("复用已有远端附件");
+    let speed = if diagnostics.reused_remote_file {
+        "未发生文件网络传输".to_string()
+    } else {
+        format!(
+            "平均 {}",
+            format_rate(diagnostics.average_speed_bytes_per_second)
+        )
+    };
+    format!(
+        "上传完成 · {speed} · 总耗时 {} · SHA/磁盘 {} · 文件上传/API等待 {} · Notion索引 {} · 目标 {endpoint} · {}",
+        format_duration(diagnostics.total_ms),
+        format_duration(diagnostics.processing_ms),
+        format_duration(diagnostics.network_ms),
+        format_duration(diagnostics.remote_api_ms),
+        diagnostics.diagnostic_hint
+    )
+}
+
+pub(super) fn emit_completed_upload(
+    app: &AppHandle,
+    transfer: &DriveTransfer,
+    stage: &str,
+    total_bytes: u64,
+    diagnostics: &UploadDiagnostics,
+) {
+    emit_progress_detailed(
+        app,
+        transfer,
+        stage,
+        total_bytes,
+        total_bytes,
+        ProgressDetails {
+            stage_code: "completed".to_string(),
+            current_speed_bytes_per_second: 0.0,
+            average_speed_bytes_per_second: diagnostics.average_speed_bytes_per_second,
+            elapsed_ms: diagnostics.total_ms,
+            stage_elapsed_ms: diagnostics.remote_api_ms,
+            endpoint_url: diagnostics.endpoint_url.clone(),
+            endpoint_host: diagnostics.endpoint_host.clone(),
+            diagnostic_hint: Some(diagnostics.diagnostic_hint.clone()),
+            ..ProgressDetails::default()
+        },
+    );
+}
 
 pub(super) async fn upload_file(
     app: &AppHandle,
@@ -29,6 +279,7 @@ pub(super) async fn upload_file(
     if request.file_path.trim().is_empty() {
         anyhow::bail!("请选择需要上传到云盘的文件");
     }
+    let operation_started = Instant::now();
     let requested_path = PathBuf::from(request.file_path.trim());
     let metadata = tokio::fs::metadata(&requested_path)
         .await
@@ -70,47 +321,103 @@ pub(super) async fn upload_file(
         updated_at: now,
     };
     storage::append_drive_transfer(app, &transfer)?;
-    emit_progress(app, &transfer, "正在计算 SHA-256", 0, size);
+    emit_progress_detailed(
+        app,
+        &transfer,
+        "正在计算 SHA-256",
+        0,
+        size,
+        ProgressDetails {
+            stage_code: "hashing".to_string(),
+            elapsed_ms: operation_started.elapsed().as_millis() as u64,
+            ..ProgressDetails::default()
+        },
+    );
 
-    let result: Result<DriveNode> = async {
-        let sha256 = hash_file(&canonical_path).await?;
+    let result: Result<(DriveNode, UploadDiagnostics)> = async {
+        let hash_started = Instant::now();
+        let transfer_for_hash = transfer.clone();
+        let app_for_hash = app.clone();
+        let operation_for_hash = operation_started;
+        let sha256 = hash_file_with_progress(&canonical_path, move |processed, total| {
+            let elapsed_ms = hash_started.elapsed().as_millis() as u64;
+            let speed = processed as f64 / (elapsed_ms as f64 / 1000.0).max(0.001);
+            emit_progress_detailed(
+                &app_for_hash,
+                &transfer_for_hash,
+                "正在计算 SHA-256（本地处理）",
+                processed,
+                total,
+                ProgressDetails {
+                    stage_code: "hashing".to_string(),
+                    current_speed_bytes_per_second: speed,
+                    average_speed_bytes_per_second: speed,
+                    elapsed_ms: operation_for_hash.elapsed().as_millis() as u64,
+                    stage_elapsed_ms: elapsed_ms,
+                    diagnostic_hint: Some("当前阶段只读取本地文件，不占用上传带宽".to_string()),
+                    ..ProgressDetails::default()
+                },
+            );
+        })
+        .await?;
+        let processing_ms = hash_started.elapsed().as_millis() as u64;
         let context = drive_context(app)?;
         let reusable_upload_id = storage::find_drive_file_by_hash(app, &sha256)?
             .and_then(|node| node.file_upload_id);
-
-        let file_upload_id = if let Some(upload_id) = reusable_upload_id {
-            emit_progress(
+        let reporter = UploadProgressReporter::new(app, &transfer, operation_started);
+        let network_started = Instant::now();
+        let (file_upload_id, reused_remote_file) = if let Some(upload_id) = reusable_upload_id {
+            emit_progress_detailed(
                 app,
                 &transfer,
                 "检测到重复内容，复用远端文件",
                 size,
                 size,
+                ProgressDetails {
+                    stage_code: "deduplicated".to_string(),
+                    elapsed_ms: operation_started.elapsed().as_millis() as u64,
+                    diagnostic_hint: Some("已跳过文件网络上传，只写入新的 Notion 索引".to_string()),
+                    ..ProgressDetails::default()
+                },
             );
-            upload_id
+            (upload_id, true)
         } else {
-            emit_progress(app, &transfer, "正在上传到 Notion", 0, size);
-            let app_handle = app.clone();
-            let progress_transfer = transfer.clone();
-            file_upload::upload_file(
+            let report = reporter.clone();
+            let upload_id = file_upload::upload_file_with_progress(
                 &context.http,
                 &canonical_path,
                 &file_name,
                 &mime_type,
                 size,
-                move |part, total| {
-                    let transferred = (part * file_upload::MULTI_PART_SIZE).min(size);
-                    emit_progress(
-                        &app_handle,
-                        &progress_transfer,
-                        &format!("正在上传分片 {part}/{total}"),
-                        transferred,
-                        size,
-                    );
-                },
+                move |event| report.report(event),
             )
-            .await?
+            .await?;
+            (upload_id, false)
         };
+        let network_ms = if reused_remote_file {
+            0
+        } else {
+            network_started.elapsed().as_millis() as u64
+        };
+        let (endpoint_url, endpoint_host, average_speed) = reporter.snapshot();
 
+        let remote_started = Instant::now();
+        emit_progress_detailed(
+            app,
+            &transfer,
+            "正在写入 Notion 文件索引",
+            size,
+            size,
+            ProgressDetails {
+                stage_code: "notion_index".to_string(),
+                average_speed_bytes_per_second: average_speed,
+                elapsed_ms: operation_started.elapsed().as_millis() as u64,
+                endpoint_url: endpoint_url.clone(),
+                endpoint_host: endpoint_host.clone(),
+                diagnostic_hint: Some("文件内容已传输完成，当前等待 Notion 页面与区块写入".to_string()),
+                ..ProgressDetails::default()
+            },
+        );
         let created_at = Utc::now().to_rfc3339();
         let mut node = DriveNode {
             id: node_id,
@@ -140,7 +447,6 @@ pub(super) async fn upload_file(
         .await?;
         node.notion_page_id = page_id.clone();
         node.notion_page_url = page_url;
-
         let block_id = match notion_index::append_file_block(
             &context.http,
             &page_id,
@@ -157,46 +463,58 @@ pub(super) async fn upload_file(
             }
         };
         node.notion_block_id = Some(block_id.clone());
-
-        if let Err(error) = notion_index::patch_remote_block_id(
-            &context.http,
-            &page_id,
-            &block_id,
-        )
-        .await
-        {
+        if let Err(error) = notion_index::patch_remote_block_id(&context.http, &page_id, &block_id).await {
             let _ = notion_index::trash_remote_page(&context.http, &page_id).await;
             return Err(error)
                 .context("写入云盘远端索引失败，未完成的文件页面已移入回收站");
         }
-
         storage::insert_drive_node(app, &node)?;
         version_store::ensure_current_version(app, &node)?;
-        Ok(node)
+        let remote_api_ms = remote_started.elapsed().as_millis() as u64;
+        let diagnostics = diagnose_upload(
+            endpoint_url,
+            endpoint_host,
+            average_speed,
+            processing_ms,
+            network_ms,
+            remote_api_ms,
+            operation_started.elapsed().as_millis() as u64,
+            reused_remote_file,
+        );
+        Ok((node, diagnostics))
     }
     .await;
 
     match result {
-        Ok(node) => {
+        Ok((node, diagnostics)) => {
             transfer.status = "completed".to_string();
             transfer.transferred_bytes = size;
-            transfer.message = Some("上传完成".to_string());
+            transfer.message = Some(upload_summary(&diagnostics));
             transfer.updated_at = Utc::now().to_rfc3339();
             storage::update_drive_transfer(app, &transfer)?;
-            emit_progress(app, &transfer, "上传完成", size, size);
+            emit_completed_upload(app, &transfer, "上传完成", size, &diagnostics);
             Ok(node)
         }
         Err(error) => {
             transfer.status = "failed".to_string();
-            transfer.message = Some(error.to_string());
+            transfer.message = Some(format!(
+                "{error} · 已耗时 {}。可根据最后显示的阶段判断是本地处理、网络上传还是 Notion API 写入失败",
+                format_duration(operation_started.elapsed().as_millis() as u64)
+            ));
             transfer.updated_at = Utc::now().to_rfc3339();
             storage::update_drive_transfer(app, &transfer)?;
-            emit_progress(
+            emit_progress_detailed(
                 app,
                 &transfer,
                 "上传失败",
                 transfer.transferred_bytes,
                 size,
+                ProgressDetails {
+                    stage_code: "failed".to_string(),
+                    elapsed_ms: operation_started.elapsed().as_millis() as u64,
+                    diagnostic_hint: Some(error.to_string()),
+                    ..ProgressDetails::default()
+                },
             );
             Err(error)
         }
@@ -621,17 +939,31 @@ fn part_path_for(destination: &Path) -> PathBuf {
 }
 
 pub(super) async fn hash_file(path: &Path) -> Result<String> {
+    hash_file_with_progress(path, |_, _| {}).await
+}
+
+pub(super) async fn hash_file_with_progress<F>(path: &Path, mut on_progress: F) -> Result<String>
+where
+    F: FnMut(u64, u64),
+{
+    let total = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("无法读取文件大小：{}", path.display()))?
+        .len();
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("无法打开文件计算校验值：{}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_SIZE];
+    let mut processed = 0_u64;
     loop {
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        processed += read as u64;
+        on_progress(processed, total);
     }
     Ok(hex::encode(hasher.finalize()))
 }
@@ -643,6 +975,27 @@ pub(super) fn emit_progress(
     transferred_bytes: u64,
     total_bytes: u64,
 ) {
+    emit_progress_detailed(
+        app,
+        transfer,
+        stage,
+        transferred_bytes,
+        total_bytes,
+        ProgressDetails {
+            stage_code: transfer.direction.clone(),
+            ..ProgressDetails::default()
+        },
+    );
+}
+
+pub(super) fn emit_progress_detailed(
+    app: &AppHandle,
+    transfer: &DriveTransfer,
+    stage: &str,
+    transferred_bytes: u64,
+    total_bytes: u64,
+    details: ProgressDetails,
+) {
     let _ = app.emit(
         "drive-transfer-progress",
         DriveTransferProgress {
@@ -651,10 +1004,39 @@ pub(super) fn emit_progress(
             direction: transfer.direction.clone(),
             file_name: transfer.file_name.clone(),
             stage: stage.to_string(),
+            stage_code: details.stage_code,
             transferred_bytes,
             total_bytes,
+            current_speed_bytes_per_second: details.current_speed_bytes_per_second,
+            average_speed_bytes_per_second: details.average_speed_bytes_per_second,
+            elapsed_ms: details.elapsed_ms,
+            stage_elapsed_ms: details.stage_elapsed_ms,
+            endpoint_url: details.endpoint_url,
+            endpoint_host: details.endpoint_host,
+            current_part: details.current_part,
+            total_parts: details.total_parts,
+            diagnostic_hint: details.diagnostic_hint,
         },
     );
+}
+
+pub(super) fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        return format!("{milliseconds} ms");
+    }
+    let seconds = milliseconds as f64 / 1_000.0;
+    if seconds < 60.0 {
+        format!("{seconds:.1} s")
+    } else {
+        format!("{:.1} min", seconds / 60.0)
+    }
+}
+
+pub(super) fn format_rate(bytes_per_second: f64) -> String {
+    if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
+        return "0 B/s".to_string();
+    }
+    format!("{}/s", format_bytes(bytes_per_second as u64))
 }
 
 fn format_bytes(bytes: u64) -> String {
