@@ -179,19 +179,21 @@ where
 
         match builder.send().await {
             Ok(response) => {
-                if !should_retry_status(response.status(), retry_policy)
-                    || attempt + 1 == MAX_ATTEMPTS
-                {
+                let status = response.status();
+                let retryable = should_retry_status(status, retry_policy);
+
+                // 即使当前请求已达到最大尝试次数，仍需把服务端的 Retry-After
+                // 写回全局调度器，保护其他同时运行的上传任务。
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    limiter().defer_for(retry_delay(&response, attempt)).await;
+                }
+
+                if !retryable || attempt + 1 == MAX_ATTEMPTS {
                     return Ok(response);
                 }
 
-                let delay = retry_delay(&response, attempt);
-                if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                    // Retry-After 是整个连接的服务端冷却要求，而不是单个任务的等待时间。
-                    // 将它写回全局调度器，避免其他并发上传继续撞限流。
-                    limiter().defer_for(delay).await;
-                } else {
-                    sleep(delay).await;
+                if status != StatusCode::TOO_MANY_REQUESTS {
+                    sleep(retry_delay(&response, attempt)).await;
                 }
             }
             Err(error) => {
