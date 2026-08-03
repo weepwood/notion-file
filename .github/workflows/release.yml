@@ -15,13 +15,16 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
+    name: Windows x64 NSIS
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -29,82 +32,133 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Read version
-        id: version
-        shell: pwsh
-        run: |
-          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
-          $tag = "v$($config.version)"
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "TAG=$tag" >> $env:GITHUB_ENV
-
-      - name: Check existing release
-        id: release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view $env:TAG *> $null
-          $exists = $LASTEXITCODE -eq 0
-          $global:LASTEXITCODE = 0
-          if ($exists) {
-            "exists=true" >> $env:GITHUB_OUTPUT
-          } else {
-            "exists=false" >> $env:GITHUB_OUTPUT
-          }
-
       - name: Install dependencies
-        if: steps.release.outputs.exists != 'true'
         run: npm install
 
       - name: Build Windows NSIS installer
-        if: steps.release.outputs.exists != 'true'
         run: npm run desktop:build
 
-      - name: Create GitHub release
-        if: steps.release.outputs.exists != 'true'
+      - name: Prepare Windows release asset
         shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $source = Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" -File | Select-Object -First 1
+          if (-not $source) {
+            throw "No NSIS installer was generated."
+          }
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $target = "release-assets/Notion.File_$($config.version)_x64-setup.exe"
+          Copy-Item $source.FullName $target -Force
+          Write-Host "Prepared Windows asset: $target"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-nsis
+          path: release-assets/*.exe
+          if-no-files-found: error
+
+  macos-arm64:
+    name: macOS Apple Silicon DMG
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Apple Silicon DMG
+        run: npm run desktop:build:mac-arm64
+
+      - name: Prepare macOS release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          SOURCE=$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -type f -name '*.dmg' -print -quit)
+          if [[ -z "$SOURCE" ]]; then
+            echo "No Apple Silicon DMG was generated." >&2
+            exit 1
+          fi
+          mkdir -p release-assets
+          TARGET="release-assets/Notion.File_${VERSION}_aarch64.dmg"
+          cp "$SOURCE" "$TARGET"
+          echo "Prepared macOS asset: $TARGET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-apple-silicon-dmg
+          path: release-assets/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [windows, macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          TAG="v${VERSION}"
+          WINDOWS_ASSET="Notion.File_${VERSION}_x64-setup.exe"
+          MAC_ASSET="Notion.File_${VERSION}_aarch64.dmg"
+
+          test -f "release-assets/${WINDOWS_ASSET}"
+          test -f "release-assets/${MAC_ASSET}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if (-not (git tag --list $env:TAG)) {
-            git tag -a $env:TAG -m "Notion File $env:TAG"
-            git push origin $env:TAG
-          }
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag -a "$TAG" -m "Notion File $TAG"
+            git push origin "$TAG"
+          fi
 
-          $assets = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-          if ($assets.Count -eq 0) {
-            throw "No NSIS installer was generated."
-          }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --title "Notion File $TAG" \
+              --generate-notes
+          fi
 
-          gh release create $env:TAG --title "Notion File $env:TAG" --generate-notes @assets
+          mapfile -t ASSETS < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for ASSET in "${ASSETS[@]}"; do
+            if [[ "$ASSET" != "$WINDOWS_ASSET" && "$ASSET" != "$MAC_ASSET" ]]; then
+              echo "Deleting extra release asset: $ASSET"
+              gh release delete-asset "$TAG" "$ASSET" --yes
+            fi
+          done
 
-      - name: Keep only NSIS installer asset
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $release = gh release view $env:TAG --json assets | ConvertFrom-Json
-          $installers = @($release.assets | Where-Object { $_.name -like "*_x64-setup.exe" })
-          if ($installers.Count -eq 0) {
-            throw "Release does not contain an NSIS setup installer."
-          }
+          mapfile -t REMAINING < <(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+          mapfile -t EXPECTED < <(printf '%s\n' "$WINDOWS_ASSET" "$MAC_ASSET" | sort)
 
-          foreach ($asset in $release.assets) {
-            if ($asset.name -notlike "*_x64-setup.exe") {
-              Write-Host "Deleting extra release asset: $($asset.name)"
-              gh release delete-asset $env:TAG $asset.name --yes
-            }
-          }
+          if [[ "${#REMAINING[@]}" -ne 2 || "${REMAINING[*]}" != "${EXPECTED[*]}" ]]; then
+            printf 'Release asset validation failed. Remaining assets: %s\n' "${REMAINING[*]}" >&2
+            exit 1
+          fi
 
-          $remaining = gh release view $env:TAG --json assets | ConvertFrom-Json
-          $remainingAssets = @($remaining.assets)
-          if ($remainingAssets.Count -ne 1 -or $remainingAssets[0].name -notlike "*_x64-setup.exe") {
-            $names = ($remainingAssets | ForEach-Object { $_.name }) -join ", "
-            throw "Release asset validation failed. Remaining assets: $names"
-          }
-
-          Write-Host "Remaining release asset: $($remainingAssets[0].name)"
+          printf 'Release %s assets:\n- %s\n- %s\n' "$TAG" "$WINDOWS_ASSET" "$MAC_ASSET"
