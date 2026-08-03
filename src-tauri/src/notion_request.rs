@@ -186,7 +186,13 @@ where
                 }
 
                 let delay = retry_delay(&response, attempt);
-                sleep(delay).await;
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    // Retry-After 是整个连接的服务端冷却要求，而不是单个任务的等待时间。
+                    // 将它写回全局调度器，避免其他并发上传继续撞限流。
+                    limiter().defer_for(delay).await;
+                } else {
+                    sleep(delay).await;
+                }
             }
             Err(error) => {
                 let can_retry = retry_policy == RetryPolicy::Idempotent || error.is_connect();
@@ -211,16 +217,22 @@ where
 
 impl RateLimiter {
     async fn acquire(&self) {
-        let delay = {
-            let mut next_allowed = self.next_allowed.lock().await;
-            let now = Instant::now();
-            let scheduled = (*next_allowed).max(now);
-            *next_allowed = scheduled + REQUEST_INTERVAL;
-            scheduled.saturating_duration_since(now)
-        };
-
+        // 在等待期间持有调度锁，避免多个任务提前预订未来时间槽。
+        // 这样 429 的全局冷却可以阻止后续所有请求，而不是只影响新加入的任务。
+        let mut next_allowed = self.next_allowed.lock().await;
+        let now = Instant::now();
+        let delay = next_allowed.saturating_duration_since(now);
         if !delay.is_zero() {
             sleep(delay).await;
+        }
+        *next_allowed = Instant::now() + REQUEST_INTERVAL;
+    }
+
+    async fn defer_for(&self, delay: Duration) {
+        let mut next_allowed = self.next_allowed.lock().await;
+        let deferred_until = Instant::now() + delay;
+        if *next_allowed < deferred_until {
+            *next_allowed = deferred_until;
         }
     }
 }
