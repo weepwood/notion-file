@@ -4,12 +4,16 @@ use chrono::Utc;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Command;
 
 pub const MAX_VIDEO_SEGMENT_BYTES: u64 = 4_800_000_000;
 const TARGET_VIDEO_SEGMENT_BYTES: u64 = 4_600_000_000;
 const MAX_SPLIT_ATTEMPTS: usize = 5;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 struct TempDirectory {
     path: PathBuf,
@@ -98,7 +102,8 @@ pub async fn split_video(
             &format!("第 {attempt} 次校准，目标每段约 4.8 GB"),
         );
 
-        let output = Command::new(&ffmpeg)
+        let mut command = hidden_async_command(&ffmpeg);
+        let output = command
             .arg("-hide_banner")
             .arg("-loglevel")
             .arg("error")
@@ -172,7 +177,8 @@ pub async fn split_video(
 }
 
 async fn probe_duration(ffprobe: &Path, input: &Path) -> Result<f64> {
-    let output = Command::new(ffprobe)
+    let mut command = hidden_async_command(ffprobe);
+    let output = command
         .arg("-v")
         .arg("error")
         .arg("-show_entries")
@@ -338,8 +344,9 @@ fn executable_name(base: &str) -> String {
     }
 }
 
-fn command_version(command: &Path) -> Option<String> {
-    let output = StdCommand::new(command).arg("-version").output().ok()?;
+fn command_version(program: &Path) -> Option<String> {
+    let mut command = hidden_std_command(program);
+    let output = command.arg("-version").output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -349,6 +356,22 @@ fn command_version(command: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
+}
+
+fn hidden_async_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    command
+        .as_std_mut()
+        .creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+fn hidden_std_command(program: &Path) -> StdCommand {
+    let mut command = StdCommand::new(program);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn emit_progress(app: &AppHandle, current: usize, total: usize, stage: &str, detail: &str) {
