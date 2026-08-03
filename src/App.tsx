@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AlertCircle,
   Archive,
@@ -504,6 +505,23 @@ export default function App() {
     }
   }
 
+  async function openSelectedNotionPage() {
+    const url = selected?.notionPageUrl;
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        throw new Error(`不支持打开 ${parsed.protocol} 链接`);
+      }
+      await openUrl(parsed.toString());
+    } catch (error) {
+      setNotice({
+        type: "error",
+        text: `无法使用系统浏览器打开 Notion 页面：${String(error)}`,
+      });
+    }
+  }
+
   async function renameSelected() {
     if (!selected) return;
     const name = window.prompt("请输入新名称", selected.name);
@@ -824,7 +842,7 @@ export default function App() {
                 {!showTrash && <div className="breadcrumbs"><button onClick={() => setFolderId(null)}><Home size={15} />根目录</button>{breadcrumbs.map((folder) => <span key={folder.id}><ChevronRight size={14} /><button onClick={() => setFolderId(folder.id)}>{folder.name}</button></span>)}</div>}
                 <div className="drive-workspace">
                   <div className="file-panel"><div className="file-table header-row"><span>名称</span><span>大小</span><span>修改时间</span><span>状态</span></div><div className="file-table-body">{visibleNodes.length === 0 ? <div className="empty-state"><FolderOpen size={36} /><strong>{query ? "没有匹配的文件" : showTrash ? "回收站为空" : "这个文件夹为空"}</strong></div> : visibleNodes.map((node) => <button key={node.id} className={`file-table row ${selectedId === node.id ? "selected" : ""}`} onClick={() => setSelectedId(node.id)} onDoubleClick={() => node.nodeType === "folder" && node.status === "active" && setFolderId(node.id)}><span className="file-name"><i>{nodeIcon(node)}</i><span><strong>{node.name}</strong><small>{node.logicalPath}</small></span></span><span>{node.nodeType === "folder" ? "—" : formatBytes(node.size)}</span><span>{formatDate(node.modifiedAt)}</span><span><em className={`node-status ${node.status}`}>{node.status === "active" ? "正常" : "已删除"}</em></span></button>)}</div></div>
-                  <aside className="inspector">{selected ? <><div className="inspector-title"><i>{nodeIcon(selected)}</i><div><strong>{selected.name}</strong><span>{selected.logicalPath}</span></div></div><dl><div><dt>类型</dt><dd>{selected.nodeType === "folder" ? "文件夹" : selected.mimeType ?? "文件"}</dd></div><div><dt>大小</dt><dd>{formatBytes(selected.size)}</dd></div><div><dt>版本</dt><dd>v{selected.version}</dd></div><div><dt>修改时间</dt><dd>{formatDate(selected.modifiedAt)}</dd></div>{selected.sha256 && <div><dt>SHA-256</dt><dd className="hash">{selected.sha256}</dd></div>}</dl><div className="inspector-actions">{selected.status === "active" && selected.nodeType === "file" && <button className="primary" onClick={downloadSelected} disabled={Boolean(busy)}><Download size={15} />下载</button>}{selected.status === "active" && selected.nodeType === "folder" && <button className="primary" onClick={downloadSelectedFolder} disabled={Boolean(busy)}><Download size={15} />下载文件夹</button>}{selected.status === "active" && selected.nodeType === "file" && <button onClick={uploadNewVersion} disabled={Boolean(busy)}><Upload size={15} />上传新版本</button>}{selected.status === "active" && <button onClick={renameSelected} disabled={Boolean(busy)}><Pencil size={15} />重命名</button>}{selected.status === "active" && <button onClick={moveSelected} disabled={Boolean(busy)}><Move size={15} />移动</button>}{selected.notionPageUrl && <button onClick={() => window.open(selected.notionPageUrl, "_blank")}><ExternalLink size={15} />Notion 页面</button>}{selected.status === "active" ? <button className="danger" onClick={() => setTrashed(true)} disabled={Boolean(busy)}><Trash2 size={15} />移入回收站</button> : <button onClick={() => setTrashed(false)} disabled={Boolean(busy)}><RotateCcw size={15} />恢复</button>}</div>{selected.nodeType === "file" && selected.status === "active" && <div className="version-panel"><div><h3>版本历史</h3><span>{versions.length} 个版本</span></div>{versions.length ? <div className="version-list">{versions.map((version) => <div className="version-item" key={version.id}><div><strong>v{version.version} · {formatBytes(version.size)}</strong><small>{formatDate(version.createdAt)} · {version.sha256.slice(0, 12)}…</small></div><button onClick={() => downloadVersion(version)} disabled={Boolean(busy)}><Download size={13} /> 下载</button></div>)}</div> : <div className="version-empty">当前文件尚未建立版本记录</div>}<div className="capability-note">新版本会追加新的 Notion 文件块；旧版本保留并可独立下载。</div></div>}</> : <div className="empty-inspector"><HardDrive size={30} /><strong>选择一个节点</strong><span>查看文件信息并执行下载、移动或版本管理。</span></div>}</aside>
+                  <aside className="inspector">{selected ? <><div className="inspector-title"><i>{nodeIcon(selected)}</i><div><strong>{selected.name}</strong><span>{selected.logicalPath}</span></div></div><dl><div><dt>类型</dt><dd>{selected.nodeType === "folder" ? "文件夹" : selected.mimeType ?? "文件"}</dd></div><div><dt>大小</dt><dd>{formatBytes(selected.size)}</dd></div><div><dt>版本</dt><dd>v{selected.version}</dd></div><div><dt>修改时间</dt><dd>{formatDate(selected.modifiedAt)}</dd></div>{selected.sha256 && <div><dt>SHA-256</dt><dd className="hash">{selected.sha256}</dd></div>}</dl><div className="inspector-actions">{selected.status === "active" && selected.nodeType === "file" && <button className="primary" onClick={downloadSelected} disabled={Boolean(busy)}><Download size={15} />下载</button>}{selected.status === "active" && selected.nodeType === "folder" && <button className="primary" onClick={downloadSelectedFolder} disabled={Boolean(busy)}><Download size={15} />下载文件夹</button>}{selected.status === "active" && selected.nodeType === "file" && <button onClick={uploadNewVersion} disabled={Boolean(busy)}><Upload size={15} />上传新版本</button>}{selected.status === "active" && <button onClick={renameSelected} disabled={Boolean(busy)}><Pencil size={15} />重命名</button>}{selected.status === "active" && <button onClick={moveSelected} disabled={Boolean(busy)}><Move size={15} />移动</button>}{selected.notionPageUrl && <button onClick={openSelectedNotionPage}><ExternalLink size={15} />Notion 页面</button>}{selected.status === "active" ? <button className="danger" onClick={() => setTrashed(true)} disabled={Boolean(busy)}><Trash2 size={15} />移入回收站</button> : <button onClick={() => setTrashed(false)} disabled={Boolean(busy)}><RotateCcw size={15} />恢复</button>}</div>{selected.nodeType === "file" && selected.status === "active" && <div className="version-panel"><div><h3>版本历史</h3><span>{versions.length} 个版本</span></div>{versions.length ? <div className="version-list">{versions.map((version) => <div className="version-item" key={version.id}><div><strong>v{version.version} · {formatBytes(version.size)}</strong><small>{formatDate(version.createdAt)} · {version.sha256.slice(0, 12)}…</small></div><button onClick={() => downloadVersion(version)} disabled={Boolean(busy)}><Download size={13} /> 下载</button></div>)}</div> : <div className="version-empty">当前文件尚未建立版本记录</div>}<div className="capability-note">新版本会追加新的 Notion 文件块；旧版本保留并可独立下载。</div></div>}</> : <div className="empty-inspector"><HardDrive size={30} /><strong>选择一个节点</strong><span>查看文件信息并执行下载、移动或版本管理。</span></div>}</aside>
                 </div>
               </>}
             </section>

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 
 fn default_upload_display_mode() -> String {
@@ -13,10 +13,40 @@ fn default_node_version() -> i64 {
     1
 }
 
+/// Windows 的 `canonicalize` 会返回 `\\?\C:\...` 或
+/// `\\?\UNC\server\share\...` 形式的扩展长度路径。该前缀是系统内部语法，
+/// 应保留在 Rust/SQLite 内部以兼容超长路径，但不应该直接显示给用户。
+fn user_visible_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
+fn serialize_path<S>(path: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&user_visible_path(path))
+}
+
+fn serialize_optional_path<S>(path: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match path {
+        Some(value) => serializer.serialize_some(&user_visible_path(value)),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_path")]
     pub folder_path: String,
     #[serde(default)]
     pub root_page_id: String,
@@ -28,7 +58,7 @@ pub struct AppConfig {
     pub drive_database_id: String,
     #[serde(default)]
     pub drive_data_source_id: String,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_path")]
     pub download_directory: String,
 }
 
@@ -53,6 +83,7 @@ impl Default for AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRequest {
+    #[serde(serialize_with = "serialize_path")]
     pub folder_path: String,
     pub root_page_id: String,
     pub archive_deleted: bool,
@@ -62,6 +93,7 @@ pub struct SyncRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SingleUploadRequest {
+    #[serde(serialize_with = "serialize_path")]
     pub file_path: String,
     pub root_page_id: String,
     #[serde(default = "default_upload_display_mode")]
@@ -72,7 +104,9 @@ pub struct SingleUploadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FfmpegStatus {
     pub available: bool,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub ffmpeg_path: Option<String>,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub ffprobe_path: Option<String>,
     pub version: Option<String>,
     pub message: String,
@@ -82,6 +116,7 @@ pub struct FfmpegStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ScannedFile {
     pub relative_path: String,
+    #[serde(serialize_with = "serialize_path")]
     pub absolute_path: String,
     pub size: u64,
     pub modified_at: i64,
@@ -93,6 +128,7 @@ pub struct ScannedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
+    #[serde(serialize_with = "serialize_path")]
     pub root: String,
     pub files: Vec<ScannedFile>,
     pub total_bytes: u64,
@@ -113,7 +149,7 @@ pub struct SyncEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncState {
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_path")]
     pub folder_path: String,
     #[serde(default)]
     pub document_page_id: Option<String>,
@@ -152,6 +188,7 @@ pub struct SyncResult {
 #[serde(rename_all = "camelCase")]
 pub struct UploadRecord {
     pub id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub file_path: String,
     pub file_name: String,
     pub size: u64,
@@ -189,6 +226,7 @@ pub struct DriveNode {
     pub status: String,
     #[serde(default = "default_node_version")]
     pub version: i64,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub original_path: Option<String>,
     pub created_at: String,
     pub modified_at: String,
@@ -211,6 +249,7 @@ pub struct DriveTransfer {
     pub node_id: Option<String>,
     pub direction: String,
     pub file_name: String,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub local_path: Option<String>,
     pub status: String,
     pub total_bytes: u64,
@@ -223,6 +262,7 @@ pub struct DriveTransfer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveUploadRequest {
+    #[serde(serialize_with = "serialize_path")]
     pub file_path: String,
     pub parent_id: Option<String>,
     #[serde(default)]
@@ -242,6 +282,7 @@ pub struct DriveQueueJob {
     pub id: String,
     pub node_id: String,
     pub parent_id: Option<String>,
+    #[serde(serialize_with = "serialize_path")]
     pub file_path: String,
     pub file_name: String,
     pub size: u64,
@@ -271,6 +312,7 @@ pub struct DriveQueueSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct DriveDownloadRequest {
     pub node_id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub destination_path: String,
 }
 
@@ -278,6 +320,7 @@ pub struct DriveDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DriveFolderDownloadRequest {
     pub folder_id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub destination_directory: String,
 }
 
@@ -286,6 +329,7 @@ pub struct DriveFolderDownloadRequest {
 pub struct DriveBatchItemResult {
     pub node_id: String,
     pub logical_path: String,
+    #[serde(serialize_with = "serialize_path")]
     pub destination_path: String,
     pub status: String,
     pub message: Option<String>,
@@ -295,6 +339,7 @@ pub struct DriveBatchItemResult {
 #[serde(rename_all = "camelCase")]
 pub struct DriveFolderDownloadResult {
     pub folder_id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub destination_directory: String,
     pub total: usize,
     pub succeeded: usize,
@@ -313,6 +358,7 @@ pub struct DriveVersion {
     pub mime_type: String,
     pub file_upload_id: String,
     pub notion_block_id: String,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub original_path: Option<String>,
     pub created_at: String,
 }
@@ -321,6 +367,7 @@ pub struct DriveVersion {
 #[serde(rename_all = "camelCase")]
 pub struct DriveVersionUploadRequest {
     pub node_id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub file_path: String,
 }
 
@@ -328,6 +375,7 @@ pub struct DriveVersionUploadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DriveVersionDownloadRequest {
     pub version_id: String,
+    #[serde(serialize_with = "serialize_path")]
     pub destination_path: String,
 }
 
@@ -378,4 +426,45 @@ pub struct DriveTransferProgress {
     pub current_part: Option<u64>,
     pub total_parts: Option<u64>,
     pub diagnostic_hint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{user_visible_path, DriveQueueJob};
+
+    #[test]
+    fn removes_windows_verbatim_drive_prefix_for_display() {
+        assert_eq!(user_visible_path(r"\\?\E:\H\example.txt"), r"E:\H\example.txt");
+    }
+
+    #[test]
+    fn converts_windows_verbatim_unc_prefix_for_display() {
+        assert_eq!(
+            user_visible_path(r"\\?\UNC\server\share\example.txt"),
+            r"\\server\share\example.txt"
+        );
+    }
+
+    #[test]
+    fn serializes_queue_path_without_internal_windows_prefix() {
+        let job = DriveQueueJob {
+            id: "queue-1".to_string(),
+            node_id: "node-1".to_string(),
+            parent_id: None,
+            file_path: r"\\?\E:\H\example.txt".to_string(),
+            file_name: "example.txt".to_string(),
+            size: 1,
+            status: "pending".to_string(),
+            stage: "pending".to_string(),
+            transferred_bytes: 0,
+            attempts: 0,
+            last_error: None,
+            created_at: "2026-08-03T00:00:00Z".to_string(),
+            updated_at: "2026-08-03T00:00:00Z".to_string(),
+            started_at: None,
+            completed_at: None,
+        };
+        let value = serde_json::to_value(job).unwrap();
+        assert_eq!(value["filePath"], r"E:\H\example.txt");
+    }
 }
