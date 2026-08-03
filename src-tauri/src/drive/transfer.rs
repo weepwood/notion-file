@@ -266,7 +266,6 @@ pub(super) async fn download_file(
 
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
-            .timeout(None)
             .build()
             .context("无法初始化下载客户端")?;
 
