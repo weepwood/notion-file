@@ -1,17 +1,7 @@
 {
   "conclusion": "success",
-  "version": "0.8.0",
   "runId": "30880286234",
   "headSha": "763d3b6100aa64af7405f647cba97372bf35c0a6",
   "runUrl": "https://github.com/weepwood/notion-file/actions/runs/30880286234",
-  "recordedAt": "2026-08-04T05:26:32Z",
-  "jobs": {
-    "windows": "success",
-    "macosAppleSilicon": "success",
-    "publish": "success"
-  },
-  "assets": [
-    "Notion.File_0.8.0_x64-setup.exe",
-    "Notion.File_0.8.0_aarch64.dmg"
-  ]
+  "recordedAt": "2026-08-04T05:26:42Z"
 }
