@@ -6,10 +6,7 @@ import "./styles.css";
 import "./advanced.css";
 import "./file-manager.css";
 
-const disposeVersionLabelSync = installVersionLabelSync();
-if (import.meta.hot) {
-  import.meta.hot.dispose(disposeVersionLabelSync);
-}
+installVersionLabelSync();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
